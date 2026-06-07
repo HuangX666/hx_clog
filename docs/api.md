@@ -18,6 +18,20 @@ Call `hx_clog_config_default()` first, override the fields you care about, then
 `hx_clog_init()`. `hx_clog_shutdown()` is safe to call once; extra calls are
 no-ops. In async mode shutdown always drains the queue before closing files.
 
+### Log directory and file name
+
+* `log_dir` may be a multi-level relative or absolute path (e.g. `"test/logs"`,
+  `"./var/log/app"`). `hx_clog_init()` **recursively creates** any missing
+  intermediate directories (both `/` and `\` separators are recognized;
+  existing directories are skipped).
+* `file_name` must be a plain file name (e.g. `"app.log"`). Do **not** embed
+  subdirectories in `file_name` — put them in `log_dir` instead:
+
+  ```c
+  cfg.log_dir   = "test/logs";   /* test/ and test/logs/ are created */
+  cfg.file_name = "xxx.log";
+  ```
+
 ## Levels
 
 ```c

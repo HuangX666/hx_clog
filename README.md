@@ -172,6 +172,18 @@ typedef struct hx_clog_config {
 } hx_clog_config_t;
 ```
 
+> **关于目录与文件名**
+>
+> - `log_dir` 支持多级相对/绝对路径（如 `"test/logs"`、`"./var/log/app"`），
+>   `hx_clog_init()` 时会**自动递归创建**所有不存在的中间目录（`/` 和 `\`
+>   两种分隔符都识别，已存在的目录会跳过）。
+> - `file_name` 应当是**纯文件名**（如 `"app.log"`），不要把子目录塞进
+>   `file_name`。需要子目录时请写到 `log_dir` 里：
+>   ```c
+>   cfg.log_dir   = "test/logs";   /* 会递归创建 test、test/logs */
+>   cfg.file_name = "xxx.log";
+>   ```
+
 ### 5.3 生命周期接口
 
 ```c
