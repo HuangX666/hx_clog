@@ -8,7 +8,8 @@
  *   %l                  level (padded short name)
  *   %t                  thread id
  *   %p                  process id
- *   %s                  source file name (basename)
+ *   %s                  source file name (basename only)
+ *   %F                  source file full path (as passed in __FILE__)
  *   %#                  line number
  *   %!                  function name
  *   %v                  log message body
@@ -149,6 +150,7 @@ unsigned int hx_format_record(const char* pattern,
             case 't': ap_uint(&a, rec->tid); break;
             case 'p': ap_uint(&a, hx_get_pid()); break;
             case 's': ap_str(&a, basename_of(rec->file)); break;
+            case 'F': ap_str(&a, rec->file ? rec->file : ""); break;
             case '#': ap_uint(&a, (unsigned long)rec->line); break;
             case '!': ap_str(&a, rec->func ? rec->func : ""); break;
             case 'v': ap_strn(&a, rec->msg, rec->msg_len); break;

@@ -67,6 +67,40 @@ int main(void) {
     CHECK(g_count == 1);
 
     hx_clog_shutdown();
+
+    /* second phase: %s (basename) vs %S (full path) */
+    {
+        hx_clog_config_t cfg2;
+        hx_clog_config_default(&cfg2);
+        cfg2.enable_console = 0;
+        cfg2.enable_file = 0;
+        cfg2.level = HX_CLOG_LEVEL_INFO;
+        cfg2.pattern = "%s | %F";   /* basename | full path */
+
+        CHECK(hx_clog_init(&cfg2) == HX_CLOG_OK);
+        CHECK(hx_clog_add_callback_sink(capture_cb, NULL) == HX_CLOG_OK);
+
+        g_count = 0;
+        HX_LOG_INFO("x");
+        CHECK(g_count == 1);
+        printf("path line: %s\n", g_last);
+
+        /* both halves must reference this file */
+        {
+            char* bar = strstr(g_last, " | ");
+            CHECK(bar != NULL);
+            *bar = '\0';
+            /* left = %s basename, right = %S full path */
+            CHECK(strstr(g_last, "test_format.c") != NULL);
+            CHECK(strstr(bar + 3, "test_format.c") != NULL);
+            /* basename half must NOT contain a path separator */
+            CHECK(strchr(g_last, '/') == NULL && strchr(g_last, '\\') == NULL);
+            /* full-path half is at least as long as the basename half */
+            CHECK(strlen(bar + 3) >= strlen(g_last));
+        }
+        hx_clog_shutdown();
+    }
+
     printf("test_format: OK\n");
     return 0;
 }
