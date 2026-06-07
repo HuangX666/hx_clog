@@ -1,0 +1,17 @@
+# build output
+/build/
+/build-*/
+install/
+
+# runtime logs
+logs/
+logs_*/
+*_logs/
+*.log
+*.dmp
+
+# editor / OS
+.vs/
+.idea/
+*.user
+.DS_Store

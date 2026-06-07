@@ -1,0 +1,240 @@
+/*
+ * hx_clog - internal shared declarations.
+ *
+ * Not installed. Used to share state and helpers between translation units.
+ */
+#ifndef HX_CLOG_INTERNAL_H
+#define HX_CLOG_INTERNAL_H
+
+#include "hx_clog.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* -------------------------------------------------------------------------
+ * Platform detection
+ * ------------------------------------------------------------------------- */
+#if defined(_WIN32)
+#  define HX_PLATFORM_WINDOWS 1
+#elif defined(__APPLE__)
+#  define HX_PLATFORM_APPLE 1
+#  define HX_PLATFORM_POSIX 1
+#elif defined(__ANDROID__)
+#  define HX_PLATFORM_ANDROID 1
+#  define HX_PLATFORM_POSIX 1
+#elif defined(__unix__) || defined(__linux__)
+#  define HX_PLATFORM_UNIX 1
+#  define HX_PLATFORM_POSIX 1
+#endif
+
+#if defined(HX_PLATFORM_WINDOWS)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <process.h>
+#  include <io.h>
+#  include <direct.h>
+#else
+#  include <pthread.h>
+#  include <unistd.h>
+#  include <sys/stat.h>
+#  include <sys/time.h>
+#  include <sys/types.h>
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* -------------------------------------------------------------------------
+ * Tunables
+ * ------------------------------------------------------------------------- */
+#define HX_CLOG_STACK_BUF_SIZE   1024   /* stack format buffer */
+#define HX_CLOG_MAX_LINE         (64 * 1024)
+#define HX_CLOG_MAX_SINKS        16
+#define HX_CLOG_PATH_MAX         1024
+#define HX_CLOG_RING_CAPACITY    1024   /* crash ring buffer entries */
+#define HX_CLOG_RING_ENTRY_SIZE  512    /* bytes per ring entry */
+
+/* -------------------------------------------------------------------------
+ * Allocator helpers (route through user allocator if set)
+ * ------------------------------------------------------------------------- */
+void* hx_clog__malloc(size_t size);
+void* hx_clog__realloc(void* ptr, size_t old_size, size_t new_size);
+void  hx_clog__free(void* ptr);
+void  hx_clog__set_allocator(const hx_clog_allocator_t* allocator);
+
+/* -------------------------------------------------------------------------
+ * Threading primitives
+ * ------------------------------------------------------------------------- */
+#if defined(HX_PLATFORM_WINDOWS)
+typedef CRITICAL_SECTION hx_mutex_t;
+typedef CONDITION_VARIABLE hx_cond_t;
+typedef HANDLE hx_thread_t;
+#else
+typedef pthread_mutex_t hx_mutex_t;
+typedef pthread_cond_t  hx_cond_t;
+typedef pthread_t       hx_thread_t;
+#endif
+
+void hx_mutex_init(hx_mutex_t* m);
+void hx_mutex_destroy(hx_mutex_t* m);
+void hx_mutex_lock(hx_mutex_t* m);
+void hx_mutex_unlock(hx_mutex_t* m);
+
+void hx_cond_init(hx_cond_t* c);
+void hx_cond_destroy(hx_cond_t* c);
+void hx_cond_signal(hx_cond_t* c);
+void hx_cond_broadcast(hx_cond_t* c);
+/* Wait with timeout in milliseconds. Returns 1 if signalled, 0 if timed out. */
+int  hx_cond_wait_ms(hx_cond_t* c, hx_mutex_t* m, unsigned int timeout_ms);
+void hx_cond_wait(hx_cond_t* c, hx_mutex_t* m);
+
+typedef void (*hx_thread_fn)(void* arg);
+int  hx_thread_create(hx_thread_t* t, hx_thread_fn fn, void* arg);
+void hx_thread_join(hx_thread_t t);
+
+/* -------------------------------------------------------------------------
+ * Atomic level (relaxed semantics are fine for filtering)
+ * ------------------------------------------------------------------------- */
+void            hx_atomic_store_level(volatile int* p, int v);
+int             hx_atomic_load_level(volatile int* p);
+
+/* -------------------------------------------------------------------------
+ * Platform helpers
+ * ------------------------------------------------------------------------- */
+unsigned long hx_get_pid(void);
+unsigned long hx_get_tid(void);
+void          hx_sleep_ms(unsigned int ms);
+
+/* Time with millisecond precision. */
+typedef struct hx_timestamp {
+    time_t       sec;
+    unsigned int msec;
+} hx_timestamp_t;
+
+void hx_now(hx_timestamp_t* ts);
+void hx_localtime(time_t t, struct tm* out);
+
+/* Filesystem. */
+int  hx_mkdir_p(const char* path);
+int  hx_file_exists(const char* path);
+long long hx_file_size(const char* path);
+int  hx_rename(const char* from, const char* to);
+int  hx_remove(const char* path);
+
+/* -------------------------------------------------------------------------
+ * Sink abstraction (declared in public header as opaque)
+ * ------------------------------------------------------------------------- */
+typedef struct hx_clog_sink hx_clog_sink_t;
+
+typedef struct hx_clog_sink_vtable {
+    int  (*write)(hx_clog_sink_t* sink, const char* data, unsigned int size);
+    int  (*flush)(hx_clog_sink_t* sink);
+    void (*close)(hx_clog_sink_t* sink);
+} hx_clog_sink_vtable_t;
+
+typedef enum hx_sink_kind {
+    HX_SINK_KIND_CONSOLE = 0,
+    HX_SINK_KIND_FILE,
+    HX_SINK_KIND_CALLBACK
+} hx_sink_kind_t;
+
+struct hx_clog_sink {
+    const hx_clog_sink_vtable_t* vtable;
+    void* impl;            /* sink-specific state */
+    hx_sink_kind_t kind;
+    int   wants_color;     /* console-only flag */
+    int   is_file;         /* used by reopen/rotate */
+};
+
+/* console / callback level-aware helpers (sink layer) */
+void hx_sink_console_emit(hx_clog_sink_t* sink, hx_clog_level_t level,
+                          const char* data, unsigned int size);
+void hx_sink_callback_set_level(hx_clog_sink_t* sink, hx_clog_level_t level);
+
+/* Built-in sink factories. */
+hx_clog_sink_t* hx_sink_console_create(int use_stderr_for_errors, int enable_color);
+hx_clog_sink_t* hx_sink_file_create(const char* dir, const char* file_name,
+                                    const hx_clog_config_t* cfg);
+hx_clog_sink_t* hx_sink_callback_create(hx_clog_callback_t cb, void* user_data);
+
+void hx_sink_write(hx_clog_sink_t* s, hx_clog_level_t level,
+                   const char* data, unsigned int size);
+void hx_sink_flush(hx_clog_sink_t* s);
+void hx_sink_close(hx_clog_sink_t* s);
+
+/* File sink specific operations (used by core for reopen). */
+int  hx_sink_file_reopen(hx_clog_sink_t* s);
+
+/* -------------------------------------------------------------------------
+ * Formatting
+ * ------------------------------------------------------------------------- */
+typedef struct hx_clog_record {
+    hx_clog_level_t level;
+    const char* file;
+    int         line;
+    const char* func;
+    unsigned long tid;
+    hx_timestamp_t ts;
+    const char* msg;        /* already-formatted user message */
+    unsigned int msg_len;
+} hx_clog_record_t;
+
+/* Format a record into out (NUL terminated). Returns number of bytes written
+ * (excluding NUL), capped at out_size-1. */
+unsigned int hx_format_record(const char* pattern,
+                              const hx_clog_record_t* rec,
+                              char* out, unsigned int out_size);
+
+const char* hx_level_short_name(hx_clog_level_t level); /* "INFO ", padded */
+
+/* -------------------------------------------------------------------------
+ * Crash ring buffer (the "last N logs")
+ * ------------------------------------------------------------------------- */
+void hx_ring_init(void);
+void hx_ring_push(const char* line, unsigned int len);
+/* Dump ring buffer to an fd/FILE using only simple writes. */
+void hx_ring_dump_fd(int fd);
+void hx_ring_destroy(void);
+
+/* -------------------------------------------------------------------------
+ * Rotation (called from file sink)
+ * ------------------------------------------------------------------------- */
+struct hx_file_sink_impl;
+int  hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming);
+void hx_rotate_cleanup(struct hx_file_sink_impl* fs);
+
+/* -------------------------------------------------------------------------
+ * Async engine
+ * ------------------------------------------------------------------------- */
+#if defined(HX_CLOG_ENABLE_ASYNC)
+int  hx_async_start(const hx_clog_config_t* cfg);
+void hx_async_stop(void);            /* drains and joins worker */
+int  hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size);
+void hx_async_flush(void);
+unsigned long long hx_async_dropped(void);
+unsigned long long hx_async_high_watermark(void);
+#endif
+
+/* -------------------------------------------------------------------------
+ * Core internal callbacks used by the async worker / sinks.
+ * ------------------------------------------------------------------------- */
+/* Write a fully-formatted line to all sinks (synchronous path). */
+void hx_core_emit_to_sinks(hx_clog_level_t level, const char* line, unsigned int len);
+
+/* Stats accessors. */
+void hx_core_add_written(unsigned long long n);
+void hx_core_add_rotated(unsigned long long n);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* HX_CLOG_INTERNAL_H */
