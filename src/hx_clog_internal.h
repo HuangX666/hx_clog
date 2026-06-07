@@ -55,12 +55,34 @@ extern "C" {
 /* -------------------------------------------------------------------------
  * Tunables
  * ------------------------------------------------------------------------- */
-#define HX_CLOG_STACK_BUF_SIZE   1024   /* stack format buffer */
-#define HX_CLOG_MAX_LINE         (64 * 1024)
+#define HX_CLOG_STACK_BUF_SIZE   1024   /* stack fast-path buffer */
+
+/*
+ * Maximum size of a single formatted log line.
+ *
+ * Default cap is 512 KB and applies to BOTH sync and async modes. Define
+ * HX_CLOG_UNLIMITED_LINE (CMake option HX_CLOG_UNLIMITED_LINE=ON) to remove the
+ * cap entirely: a line may then grow to whatever the process can allocate. The
+ * cap can also be overridden at build time via -DHX_CLOG_MAX_LINE=<bytes>.
+ */
+#if !defined(HX_CLOG_MAX_LINE)
+#  define HX_CLOG_MAX_LINE       (512 * 1024)
+#endif
+
 #define HX_CLOG_MAX_SINKS        16
 #define HX_CLOG_PATH_MAX         1024
 #define HX_CLOG_RING_CAPACITY    1024   /* crash ring buffer entries */
-#define HX_CLOG_RING_ENTRY_SIZE  512    /* bytes per ring entry */
+#define HX_CLOG_RING_ENTRY_SIZE  512    /* bytes per crash ring entry */
+
+/* Clamp a requested byte count to the configured line cap (no-op when
+ * HX_CLOG_UNLIMITED_LINE is defined). */
+static inline unsigned int hx_clamp_line(unsigned int need) {
+#if defined(HX_CLOG_UNLIMITED_LINE)
+    return need;
+#else
+    return need > (unsigned int)HX_CLOG_MAX_LINE ? (unsigned int)HX_CLOG_MAX_LINE : need;
+#endif
+}
 
 /* -------------------------------------------------------------------------
  * Allocator helpers (route through user allocator if set)

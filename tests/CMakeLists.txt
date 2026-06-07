@@ -6,6 +6,10 @@ add_executable(test_rotate test_rotate.c)
 target_link_libraries(test_rotate PRIVATE hx_clog::hx_clog)
 add_test(NAME test_rotate COMMAND test_rotate)
 
+add_executable(test_largeline test_largeline.c)
+target_link_libraries(test_largeline PRIVATE hx_clog::hx_clog)
+add_test(NAME test_largeline COMMAND test_largeline)
+
 add_executable(test_crash test_crash.c)
 target_link_libraries(test_crash PRIVATE hx_clog::hx_clog)
 add_test(NAME test_crash COMMAND test_crash)

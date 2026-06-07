@@ -878,10 +878,7 @@ void hx_clog_writev(hx_clog_level_t level,
         return;
     }
     if ((unsigned int)n >= sizeof(msg_stack)) {
-        unsigned int need = (unsigned int)n + 1;
-        if (need > HX_CLOG_MAX_LINE) {
-            need = HX_CLOG_MAX_LINE;
-        }
+        unsigned int need = hx_clamp_line((unsigned int)n + 1);
         msg_heap = (char*)hx_clog__malloc(need);
         if (msg_heap) {
             vsnprintf(msg_heap, need, fmt ? fmt : "", args_copy);
@@ -908,9 +905,9 @@ void hx_clog_writev(hx_clog_level_t level,
 
     line_len = hx_format_record(g_core.pattern, &rec, line_stack, sizeof(line_stack));
     if (line_len + 1 >= sizeof(line_stack)) {
-        /* message likely truncated; retry on heap */
-        unsigned int cap = msg_len + 1024;
-        if (cap > HX_CLOG_MAX_LINE) cap = HX_CLOG_MAX_LINE;
+        /* message likely truncated; retry on heap with room for the pattern
+         * prefix/suffix on top of the (already clamped) message. */
+        unsigned int cap = hx_clamp_line(msg_len + 1024);
         outline_heap = (char*)hx_clog__malloc(cap);
         if (outline_heap) {
             line_len = hx_format_record(g_core.pattern, &rec, outline_heap, cap);

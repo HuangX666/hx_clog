@@ -11,10 +11,17 @@
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
 
+/*
+ * A queue slot holds a heap buffer that grows on demand and is reused across
+ * the slot's lifetime, so the steady state is allocation-free for typical line
+ * sizes while still supporting very large lines (up to HX_CLOG_MAX_LINE, or
+ * unbounded when HX_CLOG_UNLIMITED_LINE is defined).
+ */
 typedef struct {
     hx_clog_level_t level;
     unsigned int    len;
-    char            data[HX_CLOG_RING_ENTRY_SIZE];
+    unsigned int    cap;   /* allocated bytes of data */
+    char*           data;  /* heap, NULL until first use */
 } async_slot_t;
 
 typedef struct {
@@ -39,6 +46,9 @@ typedef struct {
 
     hx_thread_t worker;
 
+    char*        scratch;      /* worker-owned, grows on demand */
+    unsigned int scratch_cap;
+
     unsigned long long dropped;
     unsigned long long high_watermark;
 } async_engine_t;
@@ -60,6 +70,7 @@ int hx_async_start(const hx_clog_config_t* cfg) {
     if (!g_async.slots) {
         return HX_CLOG_ERR_OUT_OF_MEMORY;
     }
+    memset(g_async.slots, 0, sizeof(async_slot_t) * cap); /* data=NULL, cap=0 */
 
     hx_mutex_init(&g_async.lock);
     hx_cond_init(&g_async.not_empty);
@@ -87,9 +98,6 @@ int hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size)
 
     if (!g_async.running) {
         return HX_CLOG_ERR_NOT_INITIALIZED;
-    }
-    if (size >= HX_CLOG_RING_ENTRY_SIZE) {
-        size = HX_CLOG_RING_ENTRY_SIZE - 1;
     }
 
     hx_mutex_lock(&g_async.lock);
@@ -120,6 +128,25 @@ int hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size)
     }
 
     slot = &g_async.slots[g_async.tail];
+    if (slot->cap < size + 1) {
+        unsigned int newcap = slot->cap ? slot->cap : 256;
+        char* nb;
+        while (newcap < size + 1) {
+            newcap *= 2;
+        }
+        nb = (char*)hx_clog__malloc(newcap);
+        if (!nb) {
+            /* cannot grow: drop this line rather than corrupt the queue */
+            g_async.dropped++;
+            hx_mutex_unlock(&g_async.lock);
+            return HX_CLOG_ERR_OUT_OF_MEMORY;
+        }
+        if (slot->data) {
+            hx_clog__free(slot->data);
+        }
+        slot->data = nb;
+        slot->cap = newcap;
+    }
     slot->level = level;
     slot->len = size;
     memcpy(slot->data, data, size);
@@ -138,7 +165,8 @@ int hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size)
 static void worker_main(void* arg) {
     (void)arg;
     for (;;) {
-        async_slot_t batch_copy;
+        hx_clog_level_t emit_level;
+        unsigned int    emit_len;
         int got;
 
         hx_mutex_lock(&g_async.lock);
@@ -176,15 +204,41 @@ static void worker_main(void* arg) {
             unsigned int written = 0;
             while (g_async.count > 0 && written < g_async.batch_size) {
                 async_slot_t* s = &g_async.slots[g_async.head];
-                batch_copy.level = s->level;
-                batch_copy.len = s->len;
-                memcpy(batch_copy.data, s->data, s->len);
+
+                /* copy the line into the worker scratch buffer so the queue
+                 * lock can be released during the (potentially slow) sink IO */
+                if (g_async.scratch_cap < s->len + 1) {
+                    unsigned int nc = g_async.scratch_cap ? g_async.scratch_cap : 256;
+                    char* nb;
+                    while (nc < s->len + 1) {
+                        nc *= 2;
+                    }
+                    nb = (char*)hx_clog__malloc(nc);
+                    if (!nb) {
+                        /* cannot grow scratch: skip this line to stay alive */
+                        g_async.head = (g_async.head + 1) % g_async.capacity;
+                        g_async.count--;
+                        g_async.dropped++;
+                        hx_cond_signal(&g_async.not_full);
+                        written++;
+                        continue;
+                    }
+                    if (g_async.scratch) {
+                        hx_clog__free(g_async.scratch);
+                    }
+                    g_async.scratch = nb;
+                    g_async.scratch_cap = nc;
+                }
+                emit_level = s->level;
+                emit_len = s->len;
+                memcpy(g_async.scratch, s->data, s->len);
+
                 g_async.head = (g_async.head + 1) % g_async.capacity;
                 g_async.count--;
                 hx_cond_signal(&g_async.not_full);
 
                 hx_mutex_unlock(&g_async.lock);
-                hx_core_emit_to_sinks(batch_copy.level, batch_copy.data, batch_copy.len);
+                hx_core_emit_to_sinks(emit_level, g_async.scratch, emit_len);
                 hx_mutex_lock(&g_async.lock);
                 written++;
             }
@@ -234,8 +288,21 @@ void hx_async_stop(void) {
 
     g_async.running = 0;
 
+    {
+        unsigned int i;
+        for (i = 0; i < g_async.capacity; ++i) {
+            if (g_async.slots[i].data) {
+                hx_clog__free(g_async.slots[i].data);
+            }
+        }
+    }
     hx_clog__free(g_async.slots);
     g_async.slots = NULL;
+    if (g_async.scratch) {
+        hx_clog__free(g_async.scratch);
+        g_async.scratch = NULL;
+        g_async.scratch_cap = 0;
+    }
     hx_mutex_destroy(&g_async.lock);
     hx_cond_destroy(&g_async.not_empty);
     hx_cond_destroy(&g_async.not_full);

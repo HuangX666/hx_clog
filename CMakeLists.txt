@@ -31,6 +31,13 @@ option(HX_CLOG_ENABLE_COLOR   "Enable colored console output" ON)
 option(HX_CLOG_ENABLE_SYSLOG  "Enable syslog sink on Unix" OFF)
 option(HX_CLOG_ENABLE_MINIDUMP "Enable minidump on Windows" ON)
 
+# Per-line size cap. By default a single log line is capped at 512 KB in both
+# sync and async modes. Turn this option ON to remove the cap entirely (a line
+# may then grow to whatever the process can allocate).
+option(HX_CLOG_UNLIMITED_LINE "Remove the per-line size cap (memory-bound)" OFF)
+# Optional explicit cap in bytes (ignored when HX_CLOG_UNLIMITED_LINE is ON).
+set(HX_CLOG_MAX_LINE_BYTES "" CACHE STRING "Override max log line size in bytes")
+
 # crash diagnostics build options
 option(HX_CLOG_ENABLE_STACKTRACE   "Enable crash stacktrace capture" ON)
 option(HX_CLOG_ENABLE_SYMBOLIZE    "Enable address symbolization" ON)
@@ -90,6 +97,12 @@ endif()
 
 if(HX_CLOG_ENABLE_CRASH)
     target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_CRASH=1)
+endif()
+
+if(HX_CLOG_UNLIMITED_LINE)
+    target_compile_definitions(hx_clog PUBLIC HX_CLOG_UNLIMITED_LINE=1)
+elseif(HX_CLOG_MAX_LINE_BYTES)
+    target_compile_definitions(hx_clog PUBLIC HX_CLOG_MAX_LINE=${HX_CLOG_MAX_LINE_BYTES})
 endif()
 
 if(HX_CLOG_ENABLE_COLOR)
