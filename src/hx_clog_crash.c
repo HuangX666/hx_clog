@@ -365,7 +365,9 @@ void hx_clog_uninstall_crash_handler(void) {
 
 #include <execinfo.h>
 #include <dlfcn.h>
-#include <ucontext.h>
+#if defined(__linux__)
+#  include <ucontext.h>
+#endif
 
 static const int k_signals[] = { SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS };
 #define K_NSIGNALS ((int)(sizeof(k_signals) / sizeof(k_signals[0])))
