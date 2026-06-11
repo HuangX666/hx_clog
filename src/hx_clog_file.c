@@ -44,6 +44,7 @@ int hx_file_open_active(struct hx_file_sink_impl* fs) {
     hx_localtime(ts.sec, &tmv);
     fs->cur_year = tmv.tm_year;
     fs->cur_yday = tmv.tm_yday;
+    fs->opened_sec = ts.sec;
     return HX_CLOG_OK;
 }
 
@@ -136,6 +137,8 @@ hx_clog_sink_t* hx_sink_file_create(const char* dir, const char* file_name,
     fs->max_backup_files = cfg ? cfg->max_backup_files : 0;
     fs->max_backup_days = cfg ? cfg->max_backup_days : 0;
     fs->rotate_daily = cfg ? cfg->rotate_daily : 0;
+    fs->rotate_interval_seconds = cfg ? cfg->rotate_interval_seconds : 0;
+    fs->rotate_on_startup = cfg ? cfg->rotate_on_startup : 0;
 
     hx_mutex_init(&fs->lock);
 
@@ -145,12 +148,17 @@ hx_clog_sink_t* hx_sink_file_create(const char* dir, const char* file_name,
         hx_clog__free(sink);
         return NULL;
     }
+    if (fs->rotate_on_startup && fs->current_size > 0) {
+        hx_rotate_force(fs);
+    }
 
     sink->vtable = &k_file_vtable;
     sink->impl = fs;
     sink->kind = HX_SINK_KIND_FILE;
     sink->wants_color = 0;
     sink->is_file = 1;
+    sink->id = 0;
+    sink->min_level = HX_CLOG_LEVEL_TRACE;
     return sink;
 }
 

@@ -165,7 +165,11 @@ typedef struct hx_clog_sink_vtable {
 typedef enum hx_sink_kind {
     HX_SINK_KIND_CONSOLE = 0,
     HX_SINK_KIND_FILE,
-    HX_SINK_KIND_CALLBACK
+    HX_SINK_KIND_CALLBACK,
+    HX_SINK_KIND_SYSLOG,
+    HX_SINK_KIND_EVENT_LOG,
+    HX_SINK_KIND_ANDROID_LOG,
+    HX_SINK_KIND_APPLE_LOG
 } hx_sink_kind_t;
 
 struct hx_clog_sink {
@@ -174,6 +178,8 @@ struct hx_clog_sink {
     hx_sink_kind_t kind;
     int   wants_color;     /* console-only flag */
     int   is_file;         /* used by reopen/rotate */
+    hx_clog_sink_id_t id;
+    hx_clog_level_t min_level;
 };
 
 /* console / callback level-aware helpers (sink layer) */
@@ -186,6 +192,10 @@ hx_clog_sink_t* hx_sink_console_create(int use_stderr_for_errors, int enable_col
 hx_clog_sink_t* hx_sink_file_create(const char* dir, const char* file_name,
                                     const hx_clog_config_t* cfg);
 hx_clog_sink_t* hx_sink_callback_create(hx_clog_callback_t cb, void* user_data);
+hx_clog_sink_t* hx_sink_syslog_create(const char* ident);
+hx_clog_sink_t* hx_sink_event_log_create(const char* source);
+hx_clog_sink_t* hx_sink_android_log_create(const char* tag);
+hx_clog_sink_t* hx_sink_apple_log_create(const char* subsystem);
 
 void hx_sink_write(hx_clog_sink_t* s, hx_clog_level_t level,
                    const char* data, unsigned int size);
@@ -198,24 +208,18 @@ int  hx_sink_file_reopen(hx_clog_sink_t* s);
 /* -------------------------------------------------------------------------
  * Formatting
  * ------------------------------------------------------------------------- */
-typedef struct hx_clog_record {
-    hx_clog_level_t level;
-    const char* file;
-    int         line;
-    const char* func;
-    unsigned long tid;
-    hx_timestamp_t ts;
-    const char* msg;        /* already-formatted user message */
-    unsigned int msg_len;
-} hx_clog_record_t;
-
 /* Format a record into out (NUL terminated). Returns number of bytes written
  * (excluding NUL), capped at out_size-1. */
 unsigned int hx_format_record(const char* pattern,
                               const hx_clog_record_t* rec,
                               char* out, unsigned int out_size);
+unsigned int hx_format_json_record(const hx_clog_record_t* rec,
+                                   char* out, unsigned int out_size);
 
 const char* hx_level_short_name(hx_clog_level_t level); /* "INFO ", padded */
+
+/* Thread-local context helpers. */
+void hx_context_snapshot_text(char* out, unsigned int cap);
 
 /* -------------------------------------------------------------------------
  * Crash ring buffer (the "last N logs")
@@ -231,6 +235,7 @@ void hx_ring_destroy(void);
  * ------------------------------------------------------------------------- */
 struct hx_file_sink_impl;
 int  hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming);
+int  hx_rotate_force(struct hx_file_sink_impl* fs);
 void hx_rotate_cleanup(struct hx_file_sink_impl* fs);
 
 /* -------------------------------------------------------------------------
@@ -250,6 +255,7 @@ unsigned long long hx_async_high_watermark(void);
  * ------------------------------------------------------------------------- */
 /* Write a fully-formatted line to all sinks (synchronous path). */
 void hx_core_emit_to_sinks(hx_clog_level_t level, const char* line, unsigned int len);
+void hx_core_flush_sinks(void);
 
 /* Stats accessors. */
 void hx_core_add_written(unsigned long long n);

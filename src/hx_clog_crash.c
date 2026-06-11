@@ -253,6 +253,39 @@ static void write_stacktrace_win(int fd, CONTEXT* ctx) {
     }
 }
 
+static void write_registers_win(int fd, CONTEXT* ctx) {
+    s_write(fd, "\nregisters:\n");
+#if defined(_M_X64) || defined(__x86_64__)
+    s_write(fd, "  RIP: "); s_write_hex(fd, (unsigned long long)ctx->Rip); s_write(fd, "\n");
+    s_write(fd, "  RSP: "); s_write_hex(fd, (unsigned long long)ctx->Rsp); s_write(fd, "\n");
+    s_write(fd, "  RBP: "); s_write_hex(fd, (unsigned long long)ctx->Rbp); s_write(fd, "\n");
+    s_write(fd, "  RAX: "); s_write_hex(fd, (unsigned long long)ctx->Rax); s_write(fd, "\n");
+    s_write(fd, "  RBX: "); s_write_hex(fd, (unsigned long long)ctx->Rbx); s_write(fd, "\n");
+    s_write(fd, "  RCX: "); s_write_hex(fd, (unsigned long long)ctx->Rcx); s_write(fd, "\n");
+    s_write(fd, "  RDX: "); s_write_hex(fd, (unsigned long long)ctx->Rdx); s_write(fd, "\n");
+    s_write(fd, "  RSI: "); s_write_hex(fd, (unsigned long long)ctx->Rsi); s_write(fd, "\n");
+    s_write(fd, "  RDI: "); s_write_hex(fd, (unsigned long long)ctx->Rdi); s_write(fd, "\n");
+    s_write(fd, "  R8 : "); s_write_hex(fd, (unsigned long long)ctx->R8);  s_write(fd, "\n");
+    s_write(fd, "  R9 : "); s_write_hex(fd, (unsigned long long)ctx->R9);  s_write(fd, "\n");
+    s_write(fd, "  R10: "); s_write_hex(fd, (unsigned long long)ctx->R10); s_write(fd, "\n");
+    s_write(fd, "  R11: "); s_write_hex(fd, (unsigned long long)ctx->R11); s_write(fd, "\n");
+    s_write(fd, "  R12: "); s_write_hex(fd, (unsigned long long)ctx->R12); s_write(fd, "\n");
+    s_write(fd, "  R13: "); s_write_hex(fd, (unsigned long long)ctx->R13); s_write(fd, "\n");
+    s_write(fd, "  R14: "); s_write_hex(fd, (unsigned long long)ctx->R14); s_write(fd, "\n");
+    s_write(fd, "  R15: "); s_write_hex(fd, (unsigned long long)ctx->R15); s_write(fd, "\n");
+#else
+    s_write(fd, "  EIP: "); s_write_hex(fd, (unsigned long long)ctx->Eip); s_write(fd, "\n");
+    s_write(fd, "  ESP: "); s_write_hex(fd, (unsigned long long)ctx->Esp); s_write(fd, "\n");
+    s_write(fd, "  EBP: "); s_write_hex(fd, (unsigned long long)ctx->Ebp); s_write(fd, "\n");
+    s_write(fd, "  EAX: "); s_write_hex(fd, (unsigned long long)ctx->Eax); s_write(fd, "\n");
+    s_write(fd, "  EBX: "); s_write_hex(fd, (unsigned long long)ctx->Ebx); s_write(fd, "\n");
+    s_write(fd, "  ECX: "); s_write_hex(fd, (unsigned long long)ctx->Ecx); s_write(fd, "\n");
+    s_write(fd, "  EDX: "); s_write_hex(fd, (unsigned long long)ctx->Edx); s_write(fd, "\n");
+    s_write(fd, "  ESI: "); s_write_hex(fd, (unsigned long long)ctx->Esi); s_write(fd, "\n");
+    s_write(fd, "  EDI: "); s_write_hex(fd, (unsigned long long)ctx->Edi); s_write(fd, "\n");
+#endif
+}
+
 static LONG WINAPI win_exception_filter(EXCEPTION_POINTERS* ep) {
     char path[HX_CLOG_PATH_MAX];
     int fd;
@@ -284,6 +317,9 @@ static LONG WINAPI win_exception_filter(EXCEPTION_POINTERS* ep) {
         if (g_cc.dump_stacktrace) {
             CONTEXT ctx = *ep->ContextRecord;
             write_stacktrace_win(fd, &ctx);
+        }
+        if (g_cc.dump_registers) {
+            write_registers_win(fd, ep->ContextRecord);
         }
         write_footer_and_logs(fd);
         _close(fd);
@@ -328,6 +364,8 @@ void hx_clog_uninstall_crash_handler(void) {
 #else
 
 #include <execinfo.h>
+#include <dlfcn.h>
+#include <ucontext.h>
 
 static const int k_signals[] = { SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS };
 #define K_NSIGNALS ((int)(sizeof(k_signals) / sizeof(k_signals[0])))
@@ -344,6 +382,84 @@ static const char* signal_name(int sig) {
     }
 }
 
+static void write_registers_posix(int fd, void* ucontext) {
+    s_write(fd, "\nregisters:\n");
+    if (!ucontext) {
+        s_write(fd, "  unavailable\n");
+        return;
+    }
+#if defined(__linux__) && defined(__x86_64__)
+    {
+        ucontext_t* uc = (ucontext_t*)ucontext;
+        greg_t* g = uc->uc_mcontext.gregs;
+        s_write(fd, "  RIP: "); s_write_hex(fd, (unsigned long long)g[REG_RIP]); s_write(fd, "\n");
+        s_write(fd, "  RSP: "); s_write_hex(fd, (unsigned long long)g[REG_RSP]); s_write(fd, "\n");
+        s_write(fd, "  RBP: "); s_write_hex(fd, (unsigned long long)g[REG_RBP]); s_write(fd, "\n");
+        s_write(fd, "  RAX: "); s_write_hex(fd, (unsigned long long)g[REG_RAX]); s_write(fd, "\n");
+        s_write(fd, "  RBX: "); s_write_hex(fd, (unsigned long long)g[REG_RBX]); s_write(fd, "\n");
+        s_write(fd, "  RCX: "); s_write_hex(fd, (unsigned long long)g[REG_RCX]); s_write(fd, "\n");
+        s_write(fd, "  RDX: "); s_write_hex(fd, (unsigned long long)g[REG_RDX]); s_write(fd, "\n");
+        s_write(fd, "  RSI: "); s_write_hex(fd, (unsigned long long)g[REG_RSI]); s_write(fd, "\n");
+        s_write(fd, "  RDI: "); s_write_hex(fd, (unsigned long long)g[REG_RDI]); s_write(fd, "\n");
+    }
+#elif defined(__linux__) && defined(__aarch64__)
+    {
+        ucontext_t* uc = (ucontext_t*)ucontext;
+        int i;
+        for (i = 0; i < 31; ++i) {
+            s_write(fd, "  X"); s_write_uint(fd, (unsigned long)i); s_write(fd, ": ");
+            s_write_hex(fd, (unsigned long long)uc->uc_mcontext.regs[i]);
+            s_write(fd, "\n");
+        }
+        s_write(fd, "  SP: "); s_write_hex(fd, (unsigned long long)uc->uc_mcontext.sp); s_write(fd, "\n");
+        s_write(fd, "  PC: "); s_write_hex(fd, (unsigned long long)uc->uc_mcontext.pc); s_write(fd, "\n");
+    }
+#else
+    s_write(fd, "  unavailable on this POSIX architecture\n");
+#endif
+}
+
+static void write_symbolized_frame_posix(int fd, void* frame, int depth) {
+    Dl_info info;
+    s_write(fd, "  #");
+    if (depth < 10) s_write(fd, "0");
+    s_write_uint(fd, (unsigned long)depth);
+    s_write(fd, " ");
+    s_write_hex(fd, (unsigned long long)(size_t)frame);
+
+    if (dladdr(frame, &info) && info.dli_fname) {
+        unsigned long long offset = 0;
+        s_write(fd, " ");
+        s_write(fd, info.dli_fname);
+        if (info.dli_sname) {
+            s_write(fd, " ");
+            s_write(fd, info.dli_sname);
+        }
+        if (info.dli_fbase) {
+            offset = (unsigned long long)((char*)frame - (char*)info.dli_fbase);
+        }
+        if (g_cc.symbolize_stacktrace) {
+            char cmd[HX_CLOG_PATH_MAX + 96];
+            char line[512];
+            FILE* fp;
+            snprintf(cmd, sizeof(cmd), "addr2line -f -p -e \"%s\" 0x%llx",
+                     info.dli_fname, offset);
+            fp = popen(cmd, "r");
+            if (fp) {
+                if (fgets(line, sizeof(line), fp)) {
+                    s_write(fd, "\n      ");
+                    s_write(fd, line);
+                    if (line[0] && line[strlen(line) - 1] != '\n') {
+                        s_write(fd, "\n");
+                    }
+                }
+                pclose(fp);
+            }
+        }
+    }
+    s_write(fd, "\n");
+}
+
 static void posix_handler(int sig, siginfo_t* info, void* ucontext) {
     char path[HX_CLOG_PATH_MAX];
     int fd;
@@ -351,8 +467,6 @@ static void posix_handler(int sig, siginfo_t* info, void* ucontext) {
     void* frames[256];
     int nframes;
     int maxd = g_cc.stacktrace_max_depth > 0 ? g_cc.stacktrace_max_depth : 64;
-
-    (void)ucontext;
 
     fd = open_crash_file(path, sizeof(path));
     if (fd >= 0) {
@@ -368,8 +482,17 @@ static void posix_handler(int sig, siginfo_t* info, void* ucontext) {
         if (g_cc.dump_stacktrace) {
             s_write(fd, "\nstacktrace:\n");
             nframes = backtrace(frames, maxd < 256 ? maxd : 256);
-            /* backtrace_symbols_fd is async-signal-safe enough for our use */
-            backtrace_symbols_fd(frames, nframes, fd);
+            if (g_cc.symbolize_stacktrace) {
+                for (i = 0; i < nframes; ++i) {
+                    write_symbolized_frame_posix(fd, frames[i], i);
+                }
+            } else {
+                /* backtrace_symbols_fd is async-signal-safe enough for our use */
+                backtrace_symbols_fd(frames, nframes, fd);
+            }
+        }
+        if (g_cc.dump_registers) {
+            write_registers_posix(fd, ucontext);
         }
         write_footer_and_logs(fd);
         close(fd);

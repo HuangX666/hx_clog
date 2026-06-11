@@ -185,9 +185,7 @@ static void worker_main(void* arg) {
             hx_mutex_unlock(&g_async.lock);
 
             /* periodic / requested flush of sinks */
-            {
-                /* flush handled by core flush of sinks */
-            }
+            hx_core_flush_sinks();
             if (do_flush) {
                 hx_mutex_lock(&g_async.lock);
                 hx_cond_broadcast(&g_async.flushed);

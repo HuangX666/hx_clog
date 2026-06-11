@@ -13,6 +13,14 @@
 #  include <sys/stat.h>
 #endif
 
+#if defined(_MSC_VER)
+#  define HX_THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__)
+#  define HX_THREAD_LOCAL __thread
+#else
+#  define HX_THREAD_LOCAL
+#endif
+
 /* =========================================================================
  * Allocator
  * ========================================================================= */
@@ -431,17 +439,118 @@ void hx_ring_destroy(void) {
 }
 
 /* =========================================================================
+ * Thread-local context and logger state
+ * ========================================================================= */
+#define HX_CONTEXT_MAX_ITEMS 16
+#define HX_CONTEXT_KEY_MAX   64
+#define HX_CONTEXT_VALUE_MAX 128
+
+typedef struct {
+    int count;
+    char keys[HX_CONTEXT_MAX_ITEMS][HX_CONTEXT_KEY_MAX];
+    char values[HX_CONTEXT_MAX_ITEMS][HX_CONTEXT_VALUE_MAX];
+} hx_context_state_t;
+
+static HX_THREAD_LOCAL hx_context_state_t g_tls_context;
+
+struct hx_clog_logger {
+    char name[128];
+    volatile int level;
+    int is_default;
+};
+
+static int context_key_index(const char* key) {
+    int i;
+    if (!key || !key[0]) {
+        return -1;
+    }
+    for (i = 0; i < g_tls_context.count; ++i) {
+        if (strcmp(g_tls_context.keys[i], key) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void hx_context_snapshot_text(char* out, unsigned int cap) {
+    int i;
+    unsigned int pos = 0;
+    if (!out || cap == 0) {
+        return;
+    }
+    out[0] = '\0';
+    for (i = 0; i < g_tls_context.count; ++i) {
+        const char* k = g_tls_context.keys[i];
+        const char* v = g_tls_context.values[i];
+        unsigned int need = (unsigned int)strlen(k) + (unsigned int)strlen(v) + 2;
+        if (pos > 0) {
+            if (pos + 1 >= cap) break;
+            out[pos++] = ' ';
+        }
+        if (pos + need >= cap) {
+            break;
+        }
+        strcpy(out + pos, k);
+        pos += (unsigned int)strlen(k);
+        out[pos++] = '=';
+        strcpy(out + pos, v);
+        pos += (unsigned int)strlen(v);
+    }
+    out[pos < cap ? pos : cap - 1] = '\0';
+}
+
+int hx_clog_context_put(const char* key, const char* value) {
+    int idx;
+    if (!key || !key[0] || !value) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    idx = context_key_index(key);
+    if (idx < 0) {
+        if (g_tls_context.count >= HX_CONTEXT_MAX_ITEMS) {
+            return HX_CLOG_ERR_INVALID_ARGUMENT;
+        }
+        idx = g_tls_context.count++;
+        strncpy(g_tls_context.keys[idx], key, HX_CONTEXT_KEY_MAX - 1);
+        g_tls_context.keys[idx][HX_CONTEXT_KEY_MAX - 1] = '\0';
+    }
+    strncpy(g_tls_context.values[idx], value, HX_CONTEXT_VALUE_MAX - 1);
+    g_tls_context.values[idx][HX_CONTEXT_VALUE_MAX - 1] = '\0';
+    return HX_CLOG_OK;
+}
+
+void hx_clog_context_remove(const char* key) {
+    int idx = context_key_index(key);
+    if (idx >= 0) {
+        int i;
+        for (i = idx; i + 1 < g_tls_context.count; ++i) {
+            strcpy(g_tls_context.keys[i], g_tls_context.keys[i + 1]);
+            strcpy(g_tls_context.values[i], g_tls_context.values[i + 1]);
+        }
+        g_tls_context.count--;
+    }
+}
+
+void hx_clog_context_clear(void) {
+    memset(&g_tls_context, 0, sizeof(g_tls_context));
+}
+
+/* =========================================================================
  * Global logger state
  * ========================================================================= */
 typedef struct {
     int initialized;
     volatile int level;          /* atomic */
     hx_clog_mode_t mode;
+    struct hx_clog_logger default_logger;
 
     hx_clog_sink_t* sinks[HX_CLOG_MAX_SINKS];
     int sink_count;
+    hx_clog_sink_id_t next_sink_id;
 
     char pattern[512];
+    hx_clog_format_mode_t format_mode;
+    hx_clog_formatter_t formatter;
+    void* formatter_user_data;
 
     hx_mutex_t sink_lock;        /* guards sink writes in sync mode + sink list */
 
@@ -478,16 +587,26 @@ void hx_clog_config_default(hx_clog_config_t* config) {
     config->enable_file = 1;
     config->enable_color = 1;
     config->enable_crash_handler = 0;
+    config->enable_syslog = 0;
+    config->enable_event_log = 0;
+    config->enable_android_log = 0;
+    config->enable_apple_log = 0;
     config->rotate_policy = HX_CLOG_ROTATE_BY_SIZE_AND_TIME;
     config->max_file_size = 10ULL * 1024ULL * 1024ULL;
     config->max_backup_files = 10;
     config->max_backup_days = 0;
     config->rotate_daily = 1;
+    config->rotate_interval_seconds = 0;
+    config->rotate_on_startup = 0;
     config->async_queue_size = 8192;
     config->async_batch_size = 64;
     config->flush_interval_ms = 1000;
     config->overflow_policy = HX_CLOG_OVERFLOW_BLOCK;
     config->pattern = "%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n";
+    config->format_mode = HX_CLOG_FORMAT_PATTERN;
+    config->formatter = NULL;
+    config->formatter_user_data = NULL;
+    config->system_logger_name = "hx_clog";
 }
 
 /* =========================================================================
@@ -593,6 +712,15 @@ void hx_core_emit_to_sinks(hx_clog_level_t level, const char* line, unsigned int
     hx_core_add_written(1);
 }
 
+void hx_core_flush_sinks(void) {
+    int i;
+    hx_mutex_lock(&g_core.sink_lock);
+    for (i = 0; i < g_core.sink_count; ++i) {
+        hx_sink_flush(g_core.sinks[i]);
+    }
+    hx_mutex_unlock(&g_core.sink_lock);
+}
+
 /* =========================================================================
  * Lifecycle
  * ========================================================================= */
@@ -601,6 +729,11 @@ static void core_once_init(void) {
     hx_mutex_init(&g_core.sink_lock);
     hx_mutex_init(&g_core.stats_lock);
     g_core.level = HX_CLOG_LEVEL_INFO;
+    g_core.default_logger.is_default = 1;
+    strcpy(g_core.default_logger.name, "hx_clog");
+    g_core.default_logger.level = HX_CLOG_LEVEL_INFO;
+    g_core.next_sink_id = 1;
+    g_core.format_mode = HX_CLOG_FORMAT_PATTERN;
 }
 
 #if defined(HX_PLATFORM_WINDOWS)
@@ -618,11 +751,80 @@ static void ensure_once(void) {
 }
 #endif
 
-static void add_sink(hx_clog_sink_t* s) {
-    if (s && g_core.sink_count < HX_CLOG_MAX_SINKS) {
-        g_core.sinks[g_core.sink_count++] = s;
-    } else if (s) {
+static int file_name_is_plain(const char* file_name) {
+    const char* p;
+    if (!file_name || !file_name[0]) {
+        return 0;
+    }
+    for (p = file_name; *p; ++p) {
+        if (*p == '/' || *p == '\\' || *p == ':') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int add_sink_locked(hx_clog_sink_t* s, hx_clog_sink_id_t* out_id) {
+    if (!s) {
+        return HX_CLOG_ERR_PLATFORM;
+    }
+    if (g_core.sink_count >= HX_CLOG_MAX_SINKS) {
         hx_sink_close(s);
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    if (s->id == 0) {
+        s->id = g_core.next_sink_id++;
+        if (g_core.next_sink_id == 0) {
+            g_core.next_sink_id = 1;
+        }
+    }
+    if (s->min_level < HX_CLOG_LEVEL_TRACE || s->min_level > HX_CLOG_LEVEL_OFF) {
+        s->min_level = HX_CLOG_LEVEL_TRACE;
+    }
+    g_core.sinks[g_core.sink_count++] = s;
+    if (out_id) {
+        *out_id = s->id;
+    }
+    return HX_CLOG_OK;
+}
+
+static int add_sink(hx_clog_sink_t* s) {
+    return add_sink_locked(s, NULL);
+}
+
+static void add_configured_system_sinks(const hx_clog_config_t* cfg) {
+    const char* ident = cfg->system_logger_name ? cfg->system_logger_name :
+                        (cfg->logger_name ? cfg->logger_name : "hx_clog");
+    if (cfg->enable_syslog) {
+        add_sink(hx_sink_syslog_create(ident));
+    }
+    if (cfg->enable_event_log) {
+        add_sink(hx_sink_event_log_create(ident));
+    }
+    if (cfg->enable_android_log) {
+        add_sink(hx_sink_android_log_create(ident));
+    }
+    if (cfg->enable_apple_log) {
+        add_sink(hx_sink_apple_log_create(ident));
+    }
+}
+
+static void close_non_callback_sinks_locked(void) {
+    int i = 0;
+    while (i < g_core.sink_count) {
+        hx_clog_sink_t* s = g_core.sinks[i];
+        if (s && s->kind != HX_SINK_KIND_CALLBACK) {
+            int j;
+            hx_sink_flush(s);
+            hx_sink_close(s);
+            for (j = i; j + 1 < g_core.sink_count; ++j) {
+                g_core.sinks[j] = g_core.sinks[j + 1];
+            }
+            g_core.sinks[g_core.sink_count - 1] = NULL;
+            g_core.sink_count--;
+        } else {
+            ++i;
+        }
     }
 }
 
@@ -643,15 +845,28 @@ int hx_clog_init(const hx_clog_config_t* in_config) {
     /* fill any zeroed required fields with sane defaults */
     if (!cfg.file_name) cfg.file_name = "app.log";
     if (!cfg.log_dir)   cfg.log_dir = "./logs";
+    if (!cfg.logger_name) cfg.logger_name = "hx_clog";
+    if (!cfg.system_logger_name) cfg.system_logger_name = cfg.logger_name;
     if (!cfg.pattern)   cfg.pattern = "%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n";
 
     apply_env_overrides(&cfg);
 
+    if (!file_name_is_plain(cfg.file_name)) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+
     strncpy(g_core.pattern, cfg.pattern, sizeof(g_core.pattern) - 1);
     g_core.pattern[sizeof(g_core.pattern) - 1] = '\0';
+    g_core.format_mode = cfg.format_mode;
+    g_core.formatter = cfg.formatter;
+    g_core.formatter_user_data = cfg.formatter_user_data;
     g_core.mode = cfg.mode;
     g_core.sink_count = 0;
     hx_atomic_store_level(&g_core.level, (int)cfg.level);
+    strncpy(g_core.default_logger.name, cfg.logger_name,
+            sizeof(g_core.default_logger.name) - 1);
+    g_core.default_logger.name[sizeof(g_core.default_logger.name) - 1] = '\0';
+    hx_atomic_store_level(&g_core.default_logger.level, (int)cfg.level);
 
     hx_ring_init();
 
@@ -670,6 +885,7 @@ int hx_clog_init(const hx_clog_config_t* in_config) {
             add_sink(fs);
         }
     }
+    add_configured_system_sinks(&cfg);
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
     if (cfg.mode == HX_CLOG_MODE_ASYNC) {
@@ -702,7 +918,6 @@ int hx_clog_is_initialized(void) {
 }
 
 void hx_clog_flush(void) {
-    int i;
     if (!g_core.initialized) {
         return;
     }
@@ -711,11 +926,7 @@ void hx_clog_flush(void) {
         hx_async_flush();
     }
 #endif
-    hx_mutex_lock(&g_core.sink_lock);
-    for (i = 0; i < g_core.sink_count; ++i) {
-        hx_sink_flush(g_core.sinks[i]);
-    }
-    hx_mutex_unlock(&g_core.sink_lock);
+    hx_core_flush_sinks();
 }
 
 void hx_clog_shutdown(void) {
@@ -749,10 +960,122 @@ void hx_clog_shutdown(void) {
 
 void hx_clog_set_level(hx_clog_level_t level) {
     hx_atomic_store_level(&g_core.level, (int)level);
+    hx_atomic_store_level(&g_core.default_logger.level, (int)level);
 }
 
 hx_clog_level_t hx_clog_get_level(void) {
     return (hx_clog_level_t)hx_atomic_load_level(&g_core.level);
+}
+
+int hx_clog_set_pattern(const char* pattern) {
+    if (!pattern) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    strncpy(g_core.pattern, pattern, sizeof(g_core.pattern) - 1);
+    g_core.pattern[sizeof(g_core.pattern) - 1] = '\0';
+    g_core.format_mode = HX_CLOG_FORMAT_PATTERN;
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_OK;
+}
+
+int hx_clog_set_format_mode(hx_clog_format_mode_t mode) {
+    if (mode != HX_CLOG_FORMAT_PATTERN && mode != HX_CLOG_FORMAT_JSON) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    g_core.format_mode = mode;
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_OK;
+}
+
+int hx_clog_set_formatter(hx_clog_formatter_t formatter, void* user_data) {
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    g_core.formatter = formatter;
+    g_core.formatter_user_data = user_data;
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_OK;
+}
+
+int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
+    hx_clog_config_t cfg;
+    hx_clog_config_t defaults;
+    int rc = HX_CLOG_OK;
+
+    ensure_once();
+    if (!g_core.initialized) {
+        return HX_CLOG_ERR_NOT_INITIALIZED;
+    }
+    if (!in_config) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    hx_clog_config_default(&defaults);
+    cfg = *in_config;
+    if (!cfg.file_name) cfg.file_name = defaults.file_name;
+    if (!cfg.log_dir) cfg.log_dir = defaults.log_dir;
+    if (!cfg.logger_name) cfg.logger_name = defaults.logger_name;
+    if (!cfg.pattern) cfg.pattern = defaults.pattern;
+    if (!cfg.system_logger_name) cfg.system_logger_name = cfg.logger_name;
+    if (cfg.format_mode != HX_CLOG_FORMAT_PATTERN &&
+        cfg.format_mode != HX_CLOG_FORMAT_JSON) {
+        cfg.format_mode = HX_CLOG_FORMAT_PATTERN;
+    }
+    if (!file_name_is_plain(cfg.file_name)) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+
+    hx_clog_flush();
+
+#if defined(HX_CLOG_ENABLE_ASYNC)
+    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+        hx_async_stop();
+    }
+#endif
+
+    hx_mutex_lock(&g_core.sink_lock);
+    close_non_callback_sinks_locked();
+
+    strncpy(g_core.pattern, cfg.pattern, sizeof(g_core.pattern) - 1);
+    g_core.pattern[sizeof(g_core.pattern) - 1] = '\0';
+    g_core.format_mode = cfg.format_mode;
+    g_core.formatter = cfg.formatter;
+    g_core.formatter_user_data = cfg.formatter_user_data;
+    hx_atomic_store_level(&g_core.level, (int)cfg.level);
+    strncpy(g_core.default_logger.name, cfg.logger_name,
+            sizeof(g_core.default_logger.name) - 1);
+    g_core.default_logger.name[sizeof(g_core.default_logger.name) - 1] = '\0';
+    hx_atomic_store_level(&g_core.default_logger.level, (int)cfg.level);
+
+    if (cfg.enable_console) {
+        add_sink(hx_sink_console_create(1, cfg.enable_color));
+    }
+    if (cfg.enable_file) {
+        hx_clog_sink_t* fs = hx_sink_file_create(cfg.log_dir, cfg.file_name, &cfg);
+        if (!fs) {
+            rc = HX_CLOG_ERR_OPEN_FILE_FAILED;
+        } else {
+            add_sink(fs);
+        }
+    }
+    add_configured_system_sinks(&cfg);
+    g_core.mode = cfg.mode;
+    hx_mutex_unlock(&g_core.sink_lock);
+
+#if defined(HX_CLOG_ENABLE_ASYNC)
+    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+        if (hx_async_start(&cfg) != HX_CLOG_OK) {
+            g_core.mode = HX_CLOG_MODE_SYNC;
+        }
+    }
+#else
+    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+        g_core.mode = HX_CLOG_MODE_SYNC;
+    }
+#endif
+    return rc;
 }
 
 int hx_clog_reopen(void) {
@@ -792,6 +1115,11 @@ int hx_clog_get_stats(hx_clog_stats_t* stats) {
 }
 
 int hx_clog_add_callback_sink(hx_clog_callback_t cb, void* user_data) {
+    return hx_clog_add_callback_sink_ex(cb, user_data, NULL);
+}
+
+int hx_clog_add_callback_sink_ex(hx_clog_callback_t cb, void* user_data,
+                                 hx_clog_sink_id_t* out_id) {
     hx_clog_sink_t* s;
     if (!cb) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
@@ -802,12 +1130,103 @@ int hx_clog_add_callback_sink(hx_clog_callback_t cb, void* user_data) {
         return HX_CLOG_ERR_OUT_OF_MEMORY;
     }
     hx_mutex_lock(&g_core.sink_lock);
-    if (g_core.sink_count >= HX_CLOG_MAX_SINKS) {
+    {
+        int r = add_sink_locked(s, out_id);
         hx_mutex_unlock(&g_core.sink_lock);
-        hx_sink_close(s);
+        return r;
+    }
+}
+
+static int add_system_sink_runtime(hx_clog_sink_t* s, hx_clog_sink_id_t* out_id) {
+    int r;
+    if (!s) {
+        return HX_CLOG_ERR_PLATFORM;
+    }
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    r = add_sink_locked(s, out_id);
+    hx_mutex_unlock(&g_core.sink_lock);
+    return r;
+}
+
+int hx_clog_add_syslog_sink(const char* ident, hx_clog_sink_id_t* out_id) {
+    return add_system_sink_runtime(hx_sink_syslog_create(ident), out_id);
+}
+
+int hx_clog_add_event_log_sink(const char* source, hx_clog_sink_id_t* out_id) {
+    return add_system_sink_runtime(hx_sink_event_log_create(source), out_id);
+}
+
+int hx_clog_add_android_log_sink(const char* tag, hx_clog_sink_id_t* out_id) {
+    return add_system_sink_runtime(hx_sink_android_log_create(tag), out_id);
+}
+
+int hx_clog_add_apple_log_sink(const char* subsystem, hx_clog_sink_id_t* out_id) {
+    return add_system_sink_runtime(hx_sink_apple_log_create(subsystem), out_id);
+}
+
+int hx_clog_remove_sink(hx_clog_sink_id_t id) {
+    int i;
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    for (i = 0; i < g_core.sink_count; ++i) {
+        if (g_core.sinks[i] && g_core.sinks[i]->id == id) {
+            int j;
+            hx_sink_flush(g_core.sinks[i]);
+            hx_sink_close(g_core.sinks[i]);
+            for (j = i; j + 1 < g_core.sink_count; ++j) {
+                g_core.sinks[j] = g_core.sinks[j + 1];
+            }
+            g_core.sinks[g_core.sink_count - 1] = NULL;
+            g_core.sink_count--;
+            hx_mutex_unlock(&g_core.sink_lock);
+            return HX_CLOG_OK;
+        }
+    }
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_ERR_INVALID_ARGUMENT;
+}
+
+int hx_clog_set_sink_level(hx_clog_sink_id_t id, hx_clog_level_t min_level) {
+    int i;
+    if (min_level < HX_CLOG_LEVEL_TRACE || min_level > HX_CLOG_LEVEL_OFF) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
     }
-    g_core.sinks[g_core.sink_count++] = s;
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    for (i = 0; i < g_core.sink_count; ++i) {
+        if (g_core.sinks[i] && g_core.sinks[i]->id == id) {
+            g_core.sinks[i]->min_level = min_level;
+            hx_mutex_unlock(&g_core.sink_lock);
+            return HX_CLOG_OK;
+        }
+    }
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_ERR_INVALID_ARGUMENT;
+}
+
+int hx_clog_flush_sink(hx_clog_sink_id_t id) {
+    int i;
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    for (i = 0; i < g_core.sink_count; ++i) {
+        if (g_core.sinks[i] && g_core.sinks[i]->id == id) {
+            hx_sink_flush(g_core.sinks[i]);
+            hx_mutex_unlock(&g_core.sink_lock);
+            return HX_CLOG_OK;
+        }
+    }
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_ERR_INVALID_ARGUMENT;
+}
+
+int hx_clog_get_sink_count(unsigned int* count) {
+    if (!count) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    *count = (unsigned int)g_core.sink_count;
     hx_mutex_unlock(&g_core.sink_lock);
     return HX_CLOG_OK;
 }
@@ -846,19 +1265,51 @@ void hx_clog_uninstall_crash_handler(void) {
 /* =========================================================================
  * Write path
  * ========================================================================= */
-void hx_clog_writev(hx_clog_level_t level,
-                    const char* file, int line, const char* func,
-                    const char* fmt, va_list args) {
+static unsigned int format_line(const hx_clog_record_t* rec,
+                                char* out,
+                                unsigned int out_size,
+                                const char* pattern,
+                                hx_clog_format_mode_t mode,
+                                hx_clog_formatter_t formatter,
+                                void* formatter_user_data) {
+    unsigned int n;
+    if (formatter) {
+        n = formatter(rec, out, out_size, formatter_user_data);
+        if (out && out_size > 0) {
+            if (n >= out_size) {
+                n = out_size - 1;
+            }
+            out[n] = '\0';
+        }
+        return n;
+    }
+    if (mode == HX_CLOG_FORMAT_JSON) {
+        return hx_format_json_record(rec, out, out_size);
+    }
+    return hx_format_record(pattern, rec, out, out_size);
+}
+
+static void core_writev(const char* logger_name,
+                        volatile int* logger_level,
+                        hx_clog_level_t level,
+                        const char* file, int line, const char* func,
+                        const char* fmt, va_list args) {
     char msg_stack[HX_CLOG_STACK_BUF_SIZE];
     char* msg = msg_stack;
     char* msg_heap = NULL;
     char line_stack[HX_CLOG_STACK_BUF_SIZE + 256];
     char* outline = line_stack;
     char* outline_heap = NULL;
+    char pattern[512];
+    char context[1024];
     int n;
     unsigned int msg_len;
     unsigned int line_len;
     hx_clog_record_t rec;
+    hx_timestamp_t ts;
+    hx_clog_format_mode_t mode;
+    hx_clog_formatter_t formatter;
+    void* formatter_user_data;
     va_list args_copy;
 
     /* fast level filter before any work */
@@ -866,6 +1317,7 @@ void hx_clog_writev(hx_clog_level_t level,
         return;
     }
     if ((int)level < hx_atomic_load_level(&g_core.level) ||
+        (logger_level && (int)level < hx_atomic_load_level(logger_level)) ||
         level == HX_CLOG_LEVEL_OFF) {
         return;
     }
@@ -894,23 +1346,40 @@ void hx_clog_writev(hx_clog_level_t level,
     va_end(args_copy);
 
     /* assemble the full line via the pattern */
+    memset(&rec, 0, sizeof(rec));
     rec.level = level;
+    rec.logger_name = logger_name && logger_name[0] ? logger_name : g_core.default_logger.name;
     rec.file = file;
     rec.line = line;
     rec.func = func;
+    rec.pid = hx_get_pid();
     rec.tid = hx_get_tid();
-    hx_now(&rec.ts);
-    rec.msg = msg;
-    rec.msg_len = msg_len;
+    hx_now(&ts);
+    rec.timestamp_sec = (long long)ts.sec;
+    rec.timestamp_msec = ts.msec;
+    rec.message = msg;
+    rec.message_len = msg_len;
+    hx_context_snapshot_text(context, sizeof(context));
+    rec.context = context;
 
-    line_len = hx_format_record(g_core.pattern, &rec, line_stack, sizeof(line_stack));
+    hx_mutex_lock(&g_core.sink_lock);
+    strncpy(pattern, g_core.pattern, sizeof(pattern) - 1);
+    pattern[sizeof(pattern) - 1] = '\0';
+    mode = g_core.format_mode;
+    formatter = g_core.formatter;
+    formatter_user_data = g_core.formatter_user_data;
+    hx_mutex_unlock(&g_core.sink_lock);
+
+    line_len = format_line(&rec, line_stack, sizeof(line_stack),
+                           pattern, mode, formatter, formatter_user_data);
     if (line_len + 1 >= sizeof(line_stack)) {
         /* message likely truncated; retry on heap with room for the pattern
          * prefix/suffix on top of the (already clamped) message. */
-        unsigned int cap = hx_clamp_line(msg_len + 1024);
+        unsigned int cap = hx_clamp_line(msg_len + (unsigned int)strlen(context) + 2048);
         outline_heap = (char*)hx_clog__malloc(cap);
         if (outline_heap) {
-            line_len = hx_format_record(g_core.pattern, &rec, outline_heap, cap);
+            line_len = format_line(&rec, outline_heap, cap,
+                                   pattern, mode, formatter, formatter_user_data);
             outline = outline_heap;
         }
     }
@@ -939,11 +1408,121 @@ void hx_clog_writev(hx_clog_level_t level,
     if (outline_heap) hx_clog__free(outline_heap);
 }
 
+void hx_clog_writev(hx_clog_level_t level,
+                    const char* file, int line, const char* func,
+                    const char* fmt, va_list args) {
+    core_writev(g_core.default_logger.name, &g_core.default_logger.level,
+                level, file, line, func, fmt, args);
+}
+
 void hx_clog_write(hx_clog_level_t level,
                    const char* file, int line, const char* func,
                    const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     hx_clog_writev(level, file, line, func, fmt, args);
+    va_end(args);
+}
+
+void hx_clog_writev_named(hx_clog_level_t level,
+                          const char* logger_name,
+                          const char* file,
+                          int line,
+                          const char* func,
+                          const char* fmt,
+                          va_list args) {
+    core_writev(logger_name, NULL, level, file, line, func, fmt, args);
+}
+
+void hx_clog_write_named(hx_clog_level_t level,
+                         const char* logger_name,
+                         const char* file,
+                         int line,
+                         const char* func,
+                         const char* fmt,
+                         ...) {
+    va_list args;
+    va_start(args, fmt);
+    hx_clog_writev_named(level, logger_name, file, line, func, fmt, args);
+    va_end(args);
+}
+
+hx_clog_logger_t* hx_clog_default_logger(void) {
+    ensure_once();
+    return &g_core.default_logger;
+}
+
+int hx_clog_logger_create(const char* name,
+                          hx_clog_level_t level,
+                          hx_clog_logger_t** out_logger) {
+    hx_clog_logger_t* logger;
+    if (!out_logger) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    if (level < HX_CLOG_LEVEL_TRACE || level > HX_CLOG_LEVEL_OFF) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    logger = (hx_clog_logger_t*)hx_clog__malloc(sizeof(*logger));
+    if (!logger) {
+        return HX_CLOG_ERR_OUT_OF_MEMORY;
+    }
+    memset(logger, 0, sizeof(*logger));
+    strncpy(logger->name, name && name[0] ? name : "hx_clog",
+            sizeof(logger->name) - 1);
+    logger->level = level;
+    logger->is_default = 0;
+    *out_logger = logger;
+    return HX_CLOG_OK;
+}
+
+void hx_clog_logger_destroy(hx_clog_logger_t* logger) {
+    if (logger && !logger->is_default) {
+        hx_clog__free(logger);
+    }
+}
+
+int hx_clog_logger_set_level(hx_clog_logger_t* logger, hx_clog_level_t level) {
+    if (!logger || level < HX_CLOG_LEVEL_TRACE || level > HX_CLOG_LEVEL_OFF) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    hx_atomic_store_level(&logger->level, (int)level);
+    if (logger->is_default) {
+        hx_atomic_store_level(&g_core.level, (int)level);
+    }
+    return HX_CLOG_OK;
+}
+
+hx_clog_level_t hx_clog_logger_get_level(const hx_clog_logger_t* logger) {
+    if (!logger) {
+        return HX_CLOG_LEVEL_OFF;
+    }
+    return (hx_clog_level_t)hx_atomic_load_level((volatile int*)&logger->level);
+}
+
+const char* hx_clog_logger_name(const hx_clog_logger_t* logger) {
+    return logger ? logger->name : "";
+}
+
+void hx_clog_logger_writev(hx_clog_logger_t* logger,
+                           hx_clog_level_t level,
+                           const char* file,
+                           int line,
+                           const char* func,
+                           const char* fmt,
+                           va_list args) {
+    hx_clog_logger_t* actual = logger ? logger : &g_core.default_logger;
+    core_writev(actual->name, &actual->level, level, file, line, func, fmt, args);
+}
+
+void hx_clog_logger_write(hx_clog_logger_t* logger,
+                          hx_clog_level_t level,
+                          const char* file,
+                          int line,
+                          const char* func,
+                          const char* fmt,
+                          ...) {
+    va_list args;
+    va_start(args, fmt);
+    hx_clog_logger_writev(logger, level, file, line, func, fmt, args);
     va_end(args);
 }

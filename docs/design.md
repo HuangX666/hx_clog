@@ -10,9 +10,9 @@ top-level `README.md`.
 | `include/hx_clog.h` | Public C ABI: types, config, lifecycle, write, macros |
 | `include/hx_clog_cpp.hpp` | Optional C++11 RAII wrapper (no C++ ABI exported) |
 | `src/hx_clog_internal.h` | Shared internal declarations + platform abstractions |
-| `src/hx_clog_core.c` | Global state, level filtering, write path, sink list, stats, allocator, threading/platform helpers, crash ring buffer |
-| `src/hx_clog_format.c` | Pattern engine (`%Y %m %d %H %M %S %e %l %t %p %s %# %! %v %n %%`) |
-| `src/hx_clog_sink.c` | Sink dispatch + console and callback sinks |
+| `src/hx_clog_core.c` | Global state, named loggers, thread-local context, level filtering, write path, sink list, stats, allocator, threading/platform helpers, crash ring buffer |
+| `src/hx_clog_format.c` | Pattern engine (`%Y %m %d %H %M %S %e %l %c %t %p %s %# %! %v %x %n %%`) and JSON formatter |
+| `src/hx_clog_sink.c` | Sink dispatch + console, callback, syslog, Event Log, logcat and Apple system sinks |
 | `src/hx_clog_file.c` | Buffered file sink, reopen |
 | `src/hx_clog_file.h` | File sink state shared with rotation |
 | `src/hx_clog_rotate.c` | Size/day rotation, archive naming, cleanup by count/age |
@@ -25,7 +25,8 @@ top-level `README.md`.
 HX_LOG_INFO(...)
   -> level filter (atomic load, before any work)
   -> vsnprintf user message (stack buffer, heap fallback for long lines)
-  -> hx_format_record() assembles the full line via the pattern
+  -> capture logger name + thread-local context
+  -> custom formatter, JSON formatter, or hx_format_record() assembles the line
   -> push into crash ring buffer (cheap, fixed memory)
   -> SYNC : write to every sink under the sink lock
      ASYNC: copy into the queue; worker drains in batches

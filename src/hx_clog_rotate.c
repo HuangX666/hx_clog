@@ -282,6 +282,8 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
     struct tm tmv;
     int need_size = 0;
     int need_time = 0;
+    int need_daily = 0;
+    int need_interval = 0;
     char stem[256], ext[64];
     char date_tag[16];
     char archive[HX_CLOG_PATH_MAX];
@@ -306,7 +308,17 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
         fs->policy == HX_CLOG_ROTATE_BY_SIZE_AND_TIME) {
         if (tmv.tm_yday != fs->cur_yday || tmv.tm_year != fs->cur_year) {
             need_time = 1;
+            need_daily = 1;
         }
+    }
+
+    if ((fs->policy == HX_CLOG_ROTATE_BY_TIME ||
+         fs->policy == HX_CLOG_ROTATE_BY_SIZE_AND_TIME) &&
+        fs->rotate_interval_seconds > 0 &&
+        fs->current_size > 0 &&
+        ts.sec >= fs->opened_sec + (time_t)fs->rotate_interval_seconds) {
+        need_time = 1;
+        need_interval = 1;
     }
 
     if (!need_size && !need_time) {
@@ -322,10 +334,12 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
         cur = tmv;
         if (!need_time) {
             /* size rotation within the same day: tag = today */
-        } else {
+        } else if (need_daily && !need_interval) {
             /* day changed: archive belongs to the previous day */
             approx = ts.sec - 86400;
             hx_localtime(approx, &cur);
+        } else if (need_interval) {
+            hx_localtime(fs->opened_sec, &cur);
         }
         snprintf(date_tag, sizeof(date_tag), "%04d-%02d-%02d",
                  cur.tm_year + 1900, cur.tm_mon + 1, cur.tm_mday);
@@ -350,6 +364,52 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
     hx_rename(fs->active_path, archive_full);
 
     /* reopen fresh active file */
+    if (hx_file_open_active(fs) != HX_CLOG_OK) {
+        return HX_CLOG_ERR_OPEN_FILE_FAILED;
+    }
+    fs->current_size = 0;
+
+    hx_core_add_rotated(1);
+    hx_rotate_cleanup(fs);
+    return HX_CLOG_OK;
+}
+
+int hx_rotate_force(struct hx_file_sink_impl* fs) {
+    hx_timestamp_t ts;
+    struct tm tmv;
+    char stem[256], ext[64];
+    char archive[HX_CLOG_PATH_MAX];
+    char archive_full[HX_CLOG_PATH_MAX];
+    char date_tag[16];
+    index_ctx ic;
+    int index;
+
+    if (!fs || !fs->fp || fs->current_size == 0) {
+        return HX_CLOG_OK;
+    }
+
+    ts.sec = fs->opened_sec > 0 ? fs->opened_sec : time(NULL);
+    ts.msec = 0;
+    hx_localtime(ts.sec, &tmv);
+    snprintf(date_tag, sizeof(date_tag), "%04d-%02d-%02d",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+
+    memset(&ic, 0, sizeof(ic));
+    split_name(fs->base_name, stem, sizeof(stem), ext, sizeof(ext));
+    strncpy(ic.stem, stem, sizeof(ic.stem) - 1);
+    strncpy(ic.date_tag, date_tag, sizeof(ic.date_tag) - 1);
+    ic.max_index = 0;
+    list_dir(fs->dir, index_cb, &ic);
+    index = ic.max_index + 1;
+    make_archive_name(archive, sizeof(archive), stem, ext, &tmv, index);
+
+    fflush(fs->fp);
+    fclose(fs->fp);
+    fs->fp = NULL;
+
+    snprintf(archive_full, sizeof(archive_full), "%s/%s", fs->dir, archive);
+    hx_rename(fs->active_path, archive_full);
+
     if (hx_file_open_active(fs) != HX_CLOG_OK) {
         return HX_CLOG_ERR_OPEN_FILE_FAILED;
     }

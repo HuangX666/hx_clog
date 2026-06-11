@@ -20,5 +20,9 @@ int main() {
     logger.warn("value = %d", 42);
     logger.error("something failed: %s", "reason");
 
+    // The C++11 convenience helpers also support lightweight {} formatting.
+    logger.context("example", "cpp11");
+    logger.infof("brace-style message: {} {}", "hello", 2026);
+
     return 0; // Logger destructor calls hx_clog_shutdown()
 }

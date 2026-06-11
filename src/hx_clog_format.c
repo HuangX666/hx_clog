@@ -6,6 +6,7 @@
  *   %Y %m %d %H %M %S   date/time components
  *   %e                  milliseconds (3 digits)
  *   %l                  level (padded short name)
+ *   %c                  logger/category name
  *   %t                  thread id
  *   %p                  process id
  *   %s                  source file name (basename only)
@@ -13,6 +14,7 @@
  *   %#                  line number
  *   %!                  function name
  *   %v                  log message body
+ *   %x                  thread-local context (key=value list)
  *   %n                  newline
  *   %%                  literal percent
  */
@@ -92,6 +94,22 @@ static void ap_uint(appender_t* a, unsigned long v) {
     }
 }
 
+static void ap_ull(appender_t* a, unsigned long long v) {
+    char tmp[32];
+    int i = 0;
+    if (v == 0) {
+        ap_char(a, '0');
+        return;
+    }
+    while (v > 0 && i < (int)sizeof(tmp)) {
+        tmp[i++] = (char)('0' + (v % 10ULL));
+        v /= 10ULL;
+    }
+    while (i > 0) {
+        ap_char(a, tmp[--i]);
+    }
+}
+
 /* Zero-padded unsigned to a fixed width (width <= 9). */
 static void ap_uint_pad(appender_t* a, unsigned long v, int width) {
     char tmp[16];
@@ -130,7 +148,7 @@ unsigned int hx_format_record(const char* pattern,
         pattern = "%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n";
     }
 
-    hx_localtime(rec->ts.sec, &tmv);
+    hx_localtime((time_t)rec->timestamp_sec, &tmv);
 
     for (p = pattern; *p; ++p) {
         if (*p != '%') {
@@ -145,15 +163,17 @@ unsigned int hx_format_record(const char* pattern,
             case 'H': ap_uint_pad(&a, (unsigned long)tmv.tm_hour, 2); break;
             case 'M': ap_uint_pad(&a, (unsigned long)tmv.tm_min, 2); break;
             case 'S': ap_uint_pad(&a, (unsigned long)tmv.tm_sec, 2); break;
-            case 'e': ap_uint_pad(&a, (unsigned long)rec->ts.msec, 3); break;
+            case 'e': ap_uint_pad(&a, (unsigned long)rec->timestamp_msec, 3); break;
             case 'l': ap_str(&a, hx_level_short_name(rec->level)); break;
+            case 'c': ap_str(&a, rec->logger_name ? rec->logger_name : ""); break;
             case 't': ap_uint(&a, rec->tid); break;
-            case 'p': ap_uint(&a, hx_get_pid()); break;
+            case 'p': ap_uint(&a, rec->pid); break;
             case 's': ap_str(&a, basename_of(rec->file)); break;
             case 'F': ap_str(&a, rec->file ? rec->file : ""); break;
             case '#': ap_uint(&a, (unsigned long)rec->line); break;
             case '!': ap_str(&a, rec->func ? rec->func : ""); break;
-            case 'v': ap_strn(&a, rec->msg, rec->msg_len); break;
+            case 'v': ap_strn(&a, rec->message, rec->message_len); break;
+            case 'x': ap_str(&a, rec->context ? rec->context : ""); break;
             case 'n': ap_char(&a, '\n'); break;
             case '%': ap_char(&a, '%'); break;
             case '\0':
@@ -171,6 +191,92 @@ unsigned int hx_format_record(const char* pattern,
             break;
         }
     }
+
+    a.buf[a.pos] = '\0';
+    return a.pos;
+}
+
+static void ap_json_escaped(appender_t* a, const char* s, unsigned int n) {
+    unsigned int i;
+    for (i = 0; s && i < n; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+            case '"':  ap_str(a, "\\\""); break;
+            case '\\': ap_str(a, "\\\\"); break;
+            case '\b': ap_str(a, "\\b"); break;
+            case '\f': ap_str(a, "\\f"); break;
+            case '\n': ap_str(a, "\\n"); break;
+            case '\r': ap_str(a, "\\r"); break;
+            case '\t': ap_str(a, "\\t"); break;
+            default:
+                if (c < 0x20) {
+                    const char* hex = "0123456789abcdef";
+                    ap_str(a, "\\u00");
+                    ap_char(a, hex[(c >> 4) & 0xF]);
+                    ap_char(a, hex[c & 0xF]);
+                } else {
+                    ap_char(a, (char)c);
+                }
+                break;
+        }
+    }
+}
+
+static void ap_json_cstr(appender_t* a, const char* s) {
+    ap_json_escaped(a, s ? s : "", s ? (unsigned int)strlen(s) : 0);
+}
+
+unsigned int hx_format_json_record(const hx_clog_record_t* rec,
+                                   char* out, unsigned int out_size) {
+    appender_t a;
+    struct tm tmv;
+
+    if (!out || out_size == 0) {
+        return 0;
+    }
+    a.buf = out;
+    a.cap = out_size;
+    a.pos = 0;
+
+    hx_localtime((time_t)rec->timestamp_sec, &tmv);
+
+    ap_char(&a, '{');
+    ap_str(&a, "\"ts\":\"");
+    ap_uint_pad(&a, (unsigned long)(tmv.tm_year + 1900), 4);
+    ap_char(&a, '-');
+    ap_uint_pad(&a, (unsigned long)(tmv.tm_mon + 1), 2);
+    ap_char(&a, '-');
+    ap_uint_pad(&a, (unsigned long)tmv.tm_mday, 2);
+    ap_char(&a, 'T');
+    ap_uint_pad(&a, (unsigned long)tmv.tm_hour, 2);
+    ap_char(&a, ':');
+    ap_uint_pad(&a, (unsigned long)tmv.tm_min, 2);
+    ap_char(&a, ':');
+    ap_uint_pad(&a, (unsigned long)tmv.tm_sec, 2);
+    ap_char(&a, '.');
+    ap_uint_pad(&a, (unsigned long)rec->timestamp_msec, 3);
+    ap_str(&a, "\",\"epoch_ms\":");
+    ap_ull(&a, (unsigned long long)rec->timestamp_sec * 1000ULL +
+               (unsigned long long)rec->timestamp_msec);
+    ap_str(&a, ",\"level\":\"");
+    ap_json_cstr(&a, hx_clog_level_name(rec->level));
+    ap_str(&a, "\",\"logger\":\"");
+    ap_json_cstr(&a, rec->logger_name ? rec->logger_name : "");
+    ap_str(&a, "\",\"pid\":");
+    ap_uint(&a, rec->pid);
+    ap_str(&a, ",\"tid\":");
+    ap_uint(&a, rec->tid);
+    ap_str(&a, ",\"file\":\"");
+    ap_json_cstr(&a, rec->file ? rec->file : "");
+    ap_str(&a, "\",\"line\":");
+    ap_uint(&a, (unsigned long)rec->line);
+    ap_str(&a, ",\"func\":\"");
+    ap_json_cstr(&a, rec->func ? rec->func : "");
+    ap_str(&a, "\",\"message\":\"");
+    ap_json_escaped(&a, rec->message, rec->message_len);
+    ap_str(&a, "\",\"context\":\"");
+    ap_json_cstr(&a, rec->context ? rec->context : "");
+    ap_str(&a, "\"}\n");
 
     a.buf[a.pos] = '\0';
     return a.pos;

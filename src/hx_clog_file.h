@@ -26,9 +26,12 @@ struct hx_file_sink_impl {
     int max_backup_files;
     int max_backup_days;
     int rotate_daily;
+    unsigned int rotate_interval_seconds;
+    int rotate_on_startup;
 
     int  cur_year;                 /* date of the currently open file */
     int  cur_yday;
+    time_t opened_sec;
 
     hx_mutex_t lock;
 };

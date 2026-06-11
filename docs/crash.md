@@ -22,6 +22,7 @@ hx_clog_crash_config_t cc;
 hx_clog_crash_config_default(&cc);
 cc.crash_dir = "./logs";
 cc.create_minidump = 1;          /* Windows .dmp */
+cc.dump_registers = 1;           /* optional CPU register dump */
 cc.symbolize_stacktrace = 1;
 hx_clog_install_crash_handler(&cc);
 ```
@@ -45,6 +46,10 @@ stacktrace:
       D:\...\tests\test_crash.c:48
   ...
 
+registers:
+  RIP: 0x00007ff7f04c194d
+  RSP: 0x00000000...
+
 last_logs:
   2026-06-07 21:05:12.426 [INFO ] [tid:283676] ... recent log line 2
 ==========================================
@@ -54,8 +59,10 @@ last_logs:
   `dbghelp` (`SymFromAddr` / `SymGetLineFromAddr64`) for symbolization, and
   optionally `MiniDumpWriteDump` for a `.dmp`. Symbolization needs PDBs.
 * **POSIX** installs `sigaction` handlers for `SIGSEGV`, `SIGABRT`, `SIGFPE`,
-  `SIGILL`, `SIGBUS`, captures frames with `backtrace()` and writes them with
-  `backtrace_symbols_fd()`. Accurate file/line needs DWARF + `addr2line`.
+  `SIGILL`, `SIGBUS`, captures frames with `backtrace()`, and when
+  `symbolize_stacktrace` is enabled uses `dladdr` plus `addr2line` where
+  available for best-effort file/line output. With symbolization disabled it
+  writes `backtrace_symbols_fd()` output directly.
 
 ## Build flags for good stack traces
 
