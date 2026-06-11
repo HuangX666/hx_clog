@@ -6,7 +6,7 @@
 [![CMake](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake&logoColor=white)](CMakeLists.txt)
 [![C](https://img.shields.io/badge/C-C99-00599C?logo=c&logoColor=white)](include/hx_clog.h)
 [![C++](https://img.shields.io/badge/C%2B%2B-11-00599C?logo=c%2B%2B&logoColor=white)](include/hx_clog_cpp.hpp)
-[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-brightgreen)](.github/workflows/ci.yml)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20iOS-brightgreen)](.github/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## 项目概览
@@ -16,7 +16,7 @@
 | 核心语言 | C99，公开 C ABI |
 | 可选封装 | C++11 RAII wrapper |
 | 构建系统 | CMake 3.16+ |
-| 支持平台 | Windows、Linux、macOS；预留 Android / Apple 平台日志适配 |
+| 支持平台 | Windows、Linux、macOS；CI smoke build 覆盖 Android arm64-v8a / iOS arm64 |
 | 输出目标 | Console、File、Rotate File、Syslog、Windows Event Log、Android logcat、Apple os_log、自定义 callback |
 | 写入模式 | 同步 / 异步，支持阻塞、丢弃新日志、丢弃旧日志等队列溢出策略 |
 | 格式化 | pattern、自定义 formatter、JSON 输出 |
@@ -32,6 +32,7 @@
 | `build-and-test` | Ubuntu / Windows / macOS，Debug / Release，全量构建 examples + tests |
 | `ctest` | format、rotate、large line、features、rotate time、crash、async、C++11 wrapper |
 | `packaging-smoke` | Linux Release 安装包 smoke test，验证导出的 CMake package 和 public headers |
+| `mobile-smoke` | Android arm64-v8a 和 iOS arm64 交叉编译 smoke build |
 | Linux syslog check | CI 中启用 `HX_CLOG_ENABLE_SYSLOG=ON` 编译 syslog sink 路径 |
 
 ## 功能亮点
@@ -45,7 +46,7 @@
 | 上下文日志 | 支持 thread-local context，pattern 中用 `%x` 输出，JSON 中自动携带 |
 | 多格式输出 | 内置 pattern、JSON formatter，也可注册自定义 formatter |
 | 多输出目标 | 控制台、文件、轮转文件、系统日志和自定义 callback sink |
-| 文件轮转 | 支持按大小、按天、按时间间隔、启动时归档旧 active 文件 |
+| 文件轮转 | 支持按大小、按天、按时间间隔、启动时归档旧 active 文件，超出保留数量的旧备份可用 zlib 压缩为 `.gz` |
 | 崩溃日志 | 支持 SEH / POSIX signal 捕获、调用栈、寄存器 dump、最后日志保护 |
 | 运行时配置 | 支持运行时修改级别、pattern、formatter、format mode 和重建内置 sinks |
 

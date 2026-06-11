@@ -9,9 +9,13 @@
  *
  * Cleanup order (per design doc):
  *   1. delete files older than max_backup_days.
- *   2. delete oldest files beyond max_backup_files.
+ *   2. compress oldest uncompressed files beyond max_backup_files.
  */
 #include "hx_clog_file.h"
+
+#if defined(HX_CLOG_ENABLE_ZLIB)
+#  include <zlib.h>
+#endif
 
 /* Split "app.log" into stem="app" and ext="log" (ext may be empty). */
 static void split_name(const char* name, char* stem, unsigned int stem_cap,
@@ -111,6 +115,7 @@ typedef struct {
 
     char (*names)[256];
     long long* mtimes;
+    int* compressed;
     int count;
     int cap;
 } collect_ctx;
@@ -135,10 +140,41 @@ static int has_suffix(const char* s, const char* suffix) {
     return strcmp(s + (ls - lsuf), suffix) == 0;
 }
 
+static int archive_suffix_match(const char* fname, const char* ext, int* compressed) {
+    char extdot[66];
+    char extgz[70];
+
+    if (compressed) {
+        *compressed = 0;
+    }
+
+    if (!ext || !ext[0]) {
+        if (has_suffix(fname, ".gz")) {
+            if (compressed) {
+                *compressed = 1;
+            }
+        }
+        return 1;
+    }
+
+    snprintf(extdot, sizeof(extdot), ".%s", ext);
+    snprintf(extgz, sizeof(extgz), ".%s.gz", ext);
+    if (has_suffix(fname, extdot)) {
+        return 1;
+    }
+    if (has_suffix(fname, extgz)) {
+        if (compressed) {
+            *compressed = 1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static void collect_cb(const char* fname, void* user) {
     collect_ctx* c = (collect_ctx*)user;
     char full[HX_CLOG_PATH_MAX];
-    char extdot[66];
+    int is_compressed = 0;
 
     if (strcmp(fname, c->active) == 0) {
         return; /* skip active file */
@@ -146,11 +182,8 @@ static void collect_cb(const char* fname, void* user) {
     if (!has_prefix(fname, c->prefix)) {
         return;
     }
-    if (c->ext[0]) {
-        snprintf(extdot, sizeof(extdot), ".%s", c->ext);
-        if (!has_suffix(fname, extdot)) {
-            return;
-        }
+    if (!archive_suffix_match(fname, c->ext, &is_compressed)) {
+        return;
     }
     if (c->count >= c->cap) {
         return;
@@ -176,7 +209,68 @@ static void collect_cb(const char* fname, void* user) {
 #endif
         c->mtimes[c->count] = mt;
     }
+    if (c->compressed) {
+        c->compressed[c->count] = is_compressed;
+    }
     c->count++;
+}
+
+#if defined(HX_CLOG_ENABLE_ZLIB)
+static int gzip_file(const char* src, const char* dst) {
+    FILE* in;
+    gzFile out;
+    char buf[16 * 1024];
+    int ok = 1;
+
+    in = fopen(src, "rb");
+    if (!in) {
+        return -1;
+    }
+    hx_remove(dst);
+    out = gzopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    for (;;) {
+        size_t n = fread(buf, 1, sizeof(buf), in);
+        if (n > 0) {
+            if (gzwrite(out, buf, (unsigned int)n) != (int)n) {
+                ok = 0;
+                break;
+            }
+        }
+        if (n < sizeof(buf)) {
+            if (ferror(in)) {
+                ok = 0;
+            }
+            break;
+        }
+    }
+    if (gzclose(out) != Z_OK) {
+        ok = 0;
+    }
+    fclose(in);
+    if (!ok) {
+        hx_remove(dst);
+        return -1;
+    }
+    return hx_remove(src);
+}
+#endif
+
+static int compress_or_delete_backup(const char* dir, const char* name) {
+    char src[HX_CLOG_PATH_MAX];
+    char dst[HX_CLOG_PATH_MAX];
+
+    snprintf(src, sizeof(src), "%s/%s", dir, name);
+#if defined(HX_CLOG_ENABLE_ZLIB)
+    snprintf(dst, sizeof(dst), "%s/%s.gz", dir, name);
+    return gzip_file(src, dst);
+#else
+    (void)dst;
+    return hx_remove(src);
+#endif
 }
 
 /* Highest existing archive index for today's date (to pick the next one). */
@@ -205,6 +299,7 @@ static void index_cb(const char* fname, void* user) {
 void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     static char names[512][256];
     static long long mtimes[512];
+    static int compressed[512];
     collect_ctx c;
     char stem[256], ext[64];
     int i, j;
@@ -218,21 +313,25 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     strncpy(c.active, fs->base_name, sizeof(c.active) - 1);
     c.names = names;
     c.mtimes = mtimes;
+    c.compressed = compressed;
     c.cap = 512;
     list_dir(fs->dir, collect_cb, &c);
 
     /* sort by mtime ascending (oldest first), simple insertion sort */
     for (i = 1; i < c.count; ++i) {
         long long mt = mtimes[i];
+        int comp = compressed[i];
         char tmp[256];
         strncpy(tmp, names[i], sizeof(tmp));
         j = i - 1;
         while (j >= 0 && mtimes[j] > mt) {
             mtimes[j + 1] = mtimes[j];
+            compressed[j + 1] = compressed[j];
             strncpy(names[j + 1], names[j], 256);
             --j;
         }
         mtimes[j + 1] = mt;
+        compressed[j + 1] = comp;
         strncpy(names[j + 1], tmp, 256);
     }
 
@@ -258,6 +357,7 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
                 if (n != i) {
                     strncpy(names[n], names[i], 256);
                     mtimes[n] = mtimes[i];
+                    compressed[n] = compressed[i];
                 }
                 ++n;
             }
@@ -265,13 +365,23 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
         c.count = n;
     }
 
-    /* 2. delete oldest beyond max_backup_files */
-    if (fs->max_backup_files > 0 && c.count > fs->max_backup_files) {
-        int to_delete = c.count - fs->max_backup_files;
-        for (i = 0; i < to_delete; ++i) {
-            char full[HX_CLOG_PATH_MAX];
-            snprintf(full, sizeof(full), "%s/%s", fs->dir, names[i]);
-            hx_remove(full);
+    /* 2. keep max_backup_files recent plain backups; compress older extras. */
+    if (fs->max_backup_files > 0) {
+        int plain_count = 0;
+        int to_compress;
+        for (i = 0; i < c.count; ++i) {
+            if (!compressed[i]) {
+                plain_count++;
+            }
+        }
+        to_compress = plain_count - fs->max_backup_files;
+        for (i = 0; i < c.count && to_compress > 0; ++i) {
+            if (!compressed[i] && names[i][0]) {
+                if (compress_or_delete_backup(fs->dir, names[i]) == 0) {
+                    names[i][0] = '\0';
+                    to_compress--;
+                }
+            }
         }
     }
 }

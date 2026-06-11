@@ -13,10 +13,13 @@ The workflow lives at `.github/workflows/ci.yml` and runs:
 * `ctest --output-on-failure` for the full test suite.
 * A Linux install/package smoke test that verifies the exported CMake package
   and installed public headers.
+* Android arm64-v8a and iOS arm64 cross-compile smoke builds.
 
 Linux CI enables `HX_CLOG_ENABLE_SYSLOG=ON` so the syslog sink path is compiled
 and linked. Windows CI covers the default minidump/Event Log link dependencies.
 macOS CI covers the Apple platform build path.
+Ubuntu/macOS builds use zlib when available, which enables `.gz` compression for
+old rotated backups beyond `max_backup_files`.
 
 ## Local Verification
 
@@ -49,6 +52,7 @@ The CTest suite covers:
 
 * Pattern formatting, level filtering, basename/full-path output.
 * File rotation by size, startup rotation, and interval time rotation.
+* zlib compression of old rotated backups when `HX_CLOG_ENABLE_ZLIB` is active.
 * Large line handling.
 * Crash handler install/configuration paths.
 * Async delivery, blocking overflow behavior, and drop-new overflow accounting.

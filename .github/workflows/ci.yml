@@ -67,3 +67,54 @@ jobs:
         run: |
           test -f install/include/hx_clog.h
           test -f install/lib/cmake/hx_clog/hx_clogConfig.cmake
+
+  mobile-smoke:
+    name: ${{ matrix.platform }} smoke build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Android arm64-v8a
+            os: ubuntu-latest
+          - platform: iOS arm64
+            os: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Android
+        if: matrix.platform == 'Android arm64-v8a'
+        shell: bash
+        run: |
+          ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [[ -z "$ndk" ]]; then
+            ndk="$(find "${ANDROID_HOME}/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          fi
+          test -n "$ndk"
+          cmake -S . -B build-android \
+            -DCMAKE_TOOLCHAIN_FILE="${ndk}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DHX_CLOG_BUILD_EXAMPLES=OFF \
+            -DHX_CLOG_BUILD_TESTS=OFF \
+            -DHX_CLOG_ENABLE_CRASH=OFF
+
+      - name: Build Android
+        if: matrix.platform == 'Android arm64-v8a'
+        run: cmake --build build-android --parallel
+
+      - name: Configure iOS
+        if: matrix.platform == 'iOS arm64'
+        run: |
+          cmake -S . -B build-ios -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DHX_CLOG_BUILD_EXAMPLES=OFF \
+            -DHX_CLOG_BUILD_TESTS=OFF \
+            -DHX_CLOG_ENABLE_CRASH=OFF
+
+      - name: Build iOS
+        if: matrix.platform == 'iOS arm64'
+        run: cmake --build build-ios --config Release --parallel

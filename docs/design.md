@@ -15,7 +15,7 @@ top-level `README.md`.
 | `src/hx_clog_sink.c` | Sink dispatch + console, callback, syslog, Event Log, logcat and Apple system sinks |
 | `src/hx_clog_file.c` | Buffered file sink, reopen |
 | `src/hx_clog_file.h` | File sink state shared with rotation |
-| `src/hx_clog_rotate.c` | Size/day rotation, archive naming, cleanup by count/age |
+| `src/hx_clog_rotate.c` | Size/day/interval/startup rotation, archive naming, cleanup by age, compression of older backups beyond the plain-file count |
 | `src/hx_clog_async.c` | Bounded ring queue + background worker (built when `HX_CLOG_ENABLE_ASYNC`) |
 | `src/hx_clog_crash.c` | SEH / POSIX-signal crash capture (built when `HX_CLOG_ENABLE_CRASH`) |
 

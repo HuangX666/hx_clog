@@ -179,6 +179,11 @@ cfg.rotate_on_startup = 1;          /* archive an existing active file at init *
 `HX_CLOG_ROTATE_BY_TIME` keeps day rotation when no interval is configured; set
 `rotate_interval_seconds` for hour/minute/second-style splits.
 
+When zlib is available and `HX_CLOG_ENABLE_ZLIB=ON`, cleanup keeps the newest
+`max_backup_files` plain rotated backups and compresses older plain backups to
+`.gz` instead of deleting them. Compressed backups are still eligible for
+`max_backup_days` age cleanup.
+
 ## Custom allocator
 
 ```c

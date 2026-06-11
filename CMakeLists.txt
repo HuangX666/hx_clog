@@ -30,6 +30,7 @@ option(HX_CLOG_ENABLE_CRASH   "Enable crash handler" ON)
 option(HX_CLOG_ENABLE_COLOR   "Enable colored console output" ON)
 option(HX_CLOG_ENABLE_SYSLOG  "Enable syslog sink on Unix" OFF)
 option(HX_CLOG_ENABLE_MINIDUMP "Enable minidump on Windows" ON)
+option(HX_CLOG_ENABLE_ZLIB "Enable zlib compression for old rotated backups" ON)
 
 # Per-line size cap. By default a single log line is capped at 512 KB in both
 # sync and async modes. Turn this option ON to remove the cap entirely (a line
@@ -97,6 +98,16 @@ endif()
 
 if(HX_CLOG_ENABLE_CRASH)
     target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_CRASH=1)
+endif()
+
+if(HX_CLOG_ENABLE_ZLIB)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_ZLIB=1)
+        target_link_libraries(hx_clog PRIVATE ZLIB::ZLIB)
+    else()
+        message(WARNING "HX_CLOG_ENABLE_ZLIB=ON but zlib was not found; old backups will be deleted instead of compressed")
+    endif()
 endif()
 
 if(HX_CLOG_UNLIMITED_LINE)
