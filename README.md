@@ -1,6 +1,123 @@
-# hx_clog C/C++11 日志框架设计文档
+# hx_clog
 
-> 默认推荐使用 **C 接口**。C++11 接口可以作为 C 接口之上的轻量封装层存在，不影响 C 项目的接入，也不强制依赖 C++ 标准库。
+一个面向 **C / C++11** 项目的跨平台日志框架，核心接口保持 C ABI，适合嵌入式、服务端、客户端、工具程序、游戏和音视频等场景接入。默认推荐使用 C 接口；C++11 接口是轻量 RAII 封装层，不影响纯 C 项目使用。
+
+[![CI](https://github.com/HuangX666/hx_clog/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/HuangX666/hx_clog/actions/workflows/ci.yml)
+[![CMake](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake&logoColor=white)](CMakeLists.txt)
+[![C](https://img.shields.io/badge/C-C99-00599C?logo=c&logoColor=white)](include/hx_clog.h)
+[![C++](https://img.shields.io/badge/C%2B%2B-11-00599C?logo=c%2B%2B&logoColor=white)](include/hx_clog_cpp.hpp)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-brightgreen)](.github/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+## 项目概览
+
+| 项目 | 说明 |
+| --- | --- |
+| 核心语言 | C99，公开 C ABI |
+| 可选封装 | C++11 RAII wrapper |
+| 构建系统 | CMake 3.16+ |
+| 支持平台 | Windows、Linux、macOS；预留 Android / Apple 平台日志适配 |
+| 输出目标 | Console、File、Rotate File、Syslog、Windows Event Log、Android logcat、Apple os_log、自定义 callback |
+| 写入模式 | 同步 / 异步，支持阻塞、丢弃新日志、丢弃旧日志等队列溢出策略 |
+| 格式化 | pattern、自定义 formatter、JSON 输出 |
+| 可靠性 | 文件轮转、启动轮转、时间间隔轮转、崩溃日志、最后 N 条日志 ring buffer |
+| 扩展点 | sink、formatter、allocator、命名 logger、线程本地 context |
+
+## CI/CD 状态
+
+当前 `master` 分支已接入 GitHub Actions，README 顶部的 CI 徽章会实时展示测试结果。
+
+| Workflow | 覆盖范围 |
+| --- | --- |
+| `build-and-test` | Ubuntu / Windows / macOS，Debug / Release，全量构建 examples + tests |
+| `ctest` | format、rotate、large line、features、rotate time、crash、async、C++11 wrapper |
+| `packaging-smoke` | Linux Release 安装包 smoke test，验证导出的 CMake package 和 public headers |
+| Linux syslog check | CI 中启用 `HX_CLOG_ENABLE_SYSLOG=ON` 编译 syslog sink 路径 |
+
+## 功能亮点
+
+| 能力 | 说明 |
+| --- | --- |
+| C 优先 | 公开 API 使用 C ABI，方便 C、C++、Rust、Go、Python FFI 或扩展层接入 |
+| 跨平台 | Windows / Linux / macOS CI 全覆盖，平台相关 sink 通过条件编译启用 |
+| 同步和异步 | 小工具可用同步模式，服务端可用异步队列降低业务线程 IO 阻塞 |
+| 多 logger | 支持默认 logger、命名 logger、独立 logger level 和 `HX_LOG_NAMED_*` 宏 |
+| 上下文日志 | 支持 thread-local context，pattern 中用 `%x` 输出，JSON 中自动携带 |
+| 多格式输出 | 内置 pattern、JSON formatter，也可注册自定义 formatter |
+| 多输出目标 | 控制台、文件、轮转文件、系统日志和自定义 callback sink |
+| 文件轮转 | 支持按大小、按天、按时间间隔、启动时归档旧 active 文件 |
+| 崩溃日志 | 支持 SEH / POSIX signal 捕获、调用栈、寄存器 dump、最后日志保护 |
+| 运行时配置 | 支持运行时修改级别、pattern、formatter、format mode 和重建内置 sinks |
+
+## 快速开始
+
+```sh
+cmake -S . -B build -DHX_CLOG_BUILD_EXAMPLES=ON -DHX_CLOG_BUILD_TESTS=ON
+cmake --build build --config Debug --parallel
+ctest --test-dir build -C Debug --output-on-failure
+```
+
+### C 最小示例
+
+```c
+#include "hx_clog.h"
+
+int main(void) {
+    hx_clog_config_t cfg;
+    hx_clog_config_default(&cfg);
+
+    cfg.log_dir = "./logs";
+    cfg.file_name = "app.log";
+    cfg.level = HX_CLOG_LEVEL_INFO;
+    cfg.mode = HX_CLOG_MODE_ASYNC;
+
+    if (hx_clog_init(&cfg) != HX_CLOG_OK) {
+        return 1;
+    }
+
+    hx_clog_context_put("request_id", "42");
+    HX_LOG_INFO("service started: port=%d", 8080);
+    HX_LOG_NAMED_WARN("net", "retry connect to %s", "127.0.0.1");
+
+    hx_clog_shutdown();
+    return 0;
+}
+```
+
+### C++11 最小示例
+
+```cpp
+#include "hx_clog_cpp.hpp"
+
+int main() {
+    hx::clog::Config config;
+    config.dir("./logs")
+          .file("cpp_demo.log")
+          .level(HX_CLOG_LEVEL_DEBUG);
+
+    hx::clog::Logger logger(config);
+    if (!logger.ok()) {
+        return 1;
+    }
+
+    logger.context("module", "demo");
+    logger.infof("hello {}, value={}", "hx_clog", 7);
+    return 0;
+}
+```
+
+## 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| [docs/api.md](docs/api.md) | API、logger、formatter、sink、轮转、环境变量 |
+| [docs/design.md](docs/design.md) | 模块划分、写入路径、线程模型、内存策略 |
+| [docs/crash.md](docs/crash.md) | Crash handler、minidump、stacktrace、last-N logs |
+| [docs/ci.md](docs/ci.md) | GitHub Actions、平台矩阵、本地验证命令 |
+
+---
+
+下面保留完整的详细设计说明，方便继续查看架构、API 和实现细节。
 
 ## 1. 项目定位
 
