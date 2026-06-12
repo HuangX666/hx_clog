@@ -1287,7 +1287,7 @@ static void recompute_override_count_locked(void) {
 static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
     hx_clog_config_t cfg;
     hx_clog_config_t defaults;
-    int rc = HX_CLOG_OK;
+    hx_clog_sink_t* new_file = NULL;
 
     if (!g_core.initialized) {
         return HX_CLOG_ERR_NOT_INITIALIZED;
@@ -1308,6 +1308,18 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
     }
     if (!file_name_is_plain(cfg.file_name)) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+
+    /* create the new file sink up front so a bad log_dir cannot destroy the
+     * existing file output: on failure nothing has been torn down yet */
+    if (cfg.enable_file) {
+        new_file = hx_sink_file_create(cfg.log_dir, cfg.file_name, &cfg);
+        if (!new_file) {
+            hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                                 "reconfigure: new file sink creation failed;"
+                                 " keeping the previous sinks");
+            return HX_CLOG_ERR_OPEN_FILE_FAILED;
+        }
     }
 
     hx_clog_flush();
@@ -1342,15 +1354,11 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
             add_sink(cs);
         }
     }
-    if (cfg.enable_file) {
-        hx_clog_sink_t* fs = hx_sink_file_create(cfg.log_dir, cfg.file_name, &cfg);
-        if (!fs) {
-            hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
-                                 "file sink creation failed (log_dir/file_name)");
-            rc = HX_CLOG_ERR_OPEN_FILE_FAILED;
-        } else {
-            add_sink(fs);
-        }
+    if (new_file) {
+        add_sink(new_file);
+        /* the old sink may have appended to the same file between the early
+         * create and the swap; re-sync the size from disk */
+        hx_sink_file_reopen(new_file);
     }
     add_configured_system_sinks(&cfg);
     g_core.mode = cfg.mode;
@@ -1368,7 +1376,7 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
         g_core.mode = HX_CLOG_MODE_SYNC;
     }
 #endif
-    return rc;
+    return HX_CLOG_OK;
 }
 
 int hx_clog_reconfigure(const hx_clog_config_t* in_config) {

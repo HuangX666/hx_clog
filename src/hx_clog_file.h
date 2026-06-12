@@ -35,6 +35,13 @@ struct hx_file_sink_impl {
     int  cur_yday;
     time_t opened_sec;
 
+    /* failure-state flags so the error handler is notified once per
+     * episode instead of once per log line */
+    int    write_failing;          /* fwrite short-write in progress */
+    int    rename_failing;         /* archive rename failing */
+    time_t rotate_fail_sec;        /* second of last failed rotation; the
+                                    * next attempt is deferred past it */
+
     hx_mutex_t lock;
 };
 

@@ -483,6 +483,12 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
     hx_now(&ts);
     hx_localtime(ts.sec, &tmv);
 
+    /* a failing rotation (e.g. archive locked by another process) is retried
+     * at most once per second, not once per log line */
+    if (fs->rotate_fail_sec != 0 && ts.sec <= fs->rotate_fail_sec) {
+        return HX_CLOG_OK;
+    }
+
     if ((fs->policy == HX_CLOG_ROTATE_BY_SIZE ||
          fs->policy == HX_CLOG_ROTATE_BY_SIZE_AND_TIME) &&
         fs->max_file_size > 0) {
@@ -561,7 +567,27 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
     }
 
     snprintf(archive_full, sizeof(archive_full), "%s/%s", fs->dir, archive);
-    hx_rename(fs->active_path, archive_full);
+    if (hx_rename(fs->active_path, archive_full) != 0) {
+        /* archive failed (file locked, permissions): keep appending to the
+         * un-archived active file. hx_file_open_active() recomputes the real
+         * current_size, so the size trigger stays correct. */
+        int first_failure = !fs->rename_failing;
+        fs->rename_failing = 1;
+        fs->rotate_fail_sec = ts.sec;
+        if (hx_file_open_active(fs) != HX_CLOG_OK) {
+            hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                                 "rotation: reopening the active log file failed");
+            return HX_CLOG_ERR_OPEN_FILE_FAILED;
+        }
+        if (first_failure) {
+            hx_core_report_error(HX_CLOG_ERR_PLATFORM,
+                                 "rotation: archiving the active log file failed"
+                                 " (locked by another process or no permission)");
+        }
+        return HX_CLOG_ERR_PLATFORM;
+    }
+    fs->rename_failing = 0;
+    fs->rotate_fail_sec = 0;
 
     /* reopen fresh active file */
     if (hx_file_open_active(fs) != HX_CLOG_OK) {
@@ -610,7 +636,24 @@ int hx_rotate_force(struct hx_file_sink_impl* fs) {
     fs->fp = NULL;
 
     snprintf(archive_full, sizeof(archive_full), "%s/%s", fs->dir, archive);
-    hx_rename(fs->active_path, archive_full);
+    if (hx_rename(fs->active_path, archive_full) != 0) {
+        int first_failure = !fs->rename_failing;
+        fs->rename_failing = 1;
+        fs->rotate_fail_sec = time(NULL); /* ts.sec holds the open time here */
+        if (hx_file_open_active(fs) != HX_CLOG_OK) {
+            hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                                 "rotation: reopening the active log file failed");
+            return HX_CLOG_ERR_OPEN_FILE_FAILED;
+        }
+        if (first_failure) {
+            hx_core_report_error(HX_CLOG_ERR_PLATFORM,
+                                 "rotation: archiving the active log file failed"
+                                 " (locked by another process or no permission)");
+        }
+        return HX_CLOG_ERR_PLATFORM;
+    }
+    fs->rename_failing = 0;
+    fs->rotate_fail_sec = 0;
 
     if (hx_file_open_active(fs) != HX_CLOG_OK) {
         hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,

@@ -6,6 +6,12 @@ if(NOT WIN32)
     find_dependency(Threads)
 endif()
 
+# A static hx_clog built with zlib support carries a $<LINK_ONLY:ZLIB::ZLIB>
+# in its exported link interface; the target must exist in the consumer.
+if(@HX_CLOG_USES_ZLIB@)
+    find_dependency(ZLIB)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/hx_clogTargets.cmake")
 
 check_required_components(hx_clog)

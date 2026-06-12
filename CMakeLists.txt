@@ -100,11 +100,15 @@ if(HX_CLOG_ENABLE_CRASH)
     target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_CRASH=1)
 endif()
 
+# HX_CLOG_USES_ZLIB feeds the exported package config and the pkg-config
+# file: a static hx_clog that linked ZLIB::ZLIB needs consumers to find zlib.
+set(HX_CLOG_USES_ZLIB FALSE)
 if(HX_CLOG_ENABLE_ZLIB)
     find_package(ZLIB QUIET)
     if(ZLIB_FOUND)
         target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_ZLIB=1)
         target_link_libraries(hx_clog PRIVATE ZLIB::ZLIB)
+        set(HX_CLOG_USES_ZLIB TRUE)
     else()
         message(WARNING "HX_CLOG_ENABLE_ZLIB=ON but zlib was not found; old backups will be deleted instead of compressed")
     endif()
@@ -221,6 +225,9 @@ if(NOT WIN32)
     set(HX_CLOG_PC_LIBS_PRIVATE "-lpthread")
     if(NOT APPLE)
         string(APPEND HX_CLOG_PC_LIBS_PRIVATE " -ldl")
+    endif()
+    if(HX_CLOG_USES_ZLIB)
+        string(APPEND HX_CLOG_PC_LIBS_PRIVATE " -lz")
     endif()
     configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/hx_clog.pc.in

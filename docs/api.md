@@ -21,7 +21,10 @@ Call `hx_clog_config_default()` first, override the fields you care about, then
 no-ops. In async mode shutdown always drains the queue before closing files.
 `hx_clog_reconfigure()` updates the level, default logger name, format mode,
 pattern/custom formatter, mode, and built-in sinks while preserving callback
-sinks.
+sinks. Since 1.1.0 the file sink swap is **fail-safe**: the new file sink is
+created first, and if that fails (bad `log_dir`, no permission) the call
+returns `HX_CLOG_ERR_OPEN_FILE_FAILED` with **all previous sinks left
+untouched** — a typo in a new log directory can no longer silence file output.
 
 ### Log directory and file name
 
@@ -242,9 +245,11 @@ int hx_clog_set_error_handler(hx_clog_error_handler_t handler, void* user_data);
 ```
 
 The library never prints its own errors. The handler is invoked on sink
-creation failures during init/reconfigure, file open/rotation failures, and
-async queue drops (first drop, then every 10000th). It may run on any thread —
-keep it fast and never call back into hx_clog from it.
+creation failures during init/reconfigure, file open/rotation failures
+(including a failed archive rename — e.g. the file is locked by another
+process), file write failures (disk full; reported once per failure episode,
+not per line), and async queue drops (first drop, then every 10000th). It may
+run on any thread — keep it fast and never call back into hx_clog from it.
 
 ## Duplicate suppression (1.1.0)
 

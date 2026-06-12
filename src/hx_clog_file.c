@@ -53,6 +53,7 @@ int hx_file_open_active(struct hx_file_sink_impl* fs) {
 static int file_write(hx_clog_sink_t* sink, const char* data, unsigned int size) {
     struct hx_file_sink_impl* fs = (struct hx_file_sink_impl*)sink->impl;
     size_t written;
+    int report_fail = 0;
 
     hx_mutex_lock(&fs->lock);
 
@@ -68,7 +69,22 @@ static int file_write(hx_clog_sink_t* sink, const char* data, unsigned int size)
     written = fwrite(data, 1, size, fs->fp);
     fs->current_size += (unsigned long long)written;
 
+    /* notify once per failure episode, not once per line (disk full is the
+     * classic case); report after the lock is released */
+    if (written != size) {
+        if (!fs->write_failing) {
+            fs->write_failing = 1;
+            report_fail = 1;
+        }
+    } else if (fs->write_failing) {
+        fs->write_failing = 0;
+    }
+
     hx_mutex_unlock(&fs->lock);
+    if (report_fail) {
+        hx_core_report_error(HX_CLOG_ERR_PLATFORM,
+                             "file sink: write failed (disk full or device error)");
+    }
     return (written == size) ? HX_CLOG_OK : HX_CLOG_ERR_PLATFORM;
 }
 

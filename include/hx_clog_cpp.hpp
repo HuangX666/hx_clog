@@ -121,16 +121,26 @@ public:
     /* Build the C config struct, repointing string fields at our storage.
      * The returned struct is valid only while this Config is alive. */
     const hx_clog_config_t& build() {
+        sync_strings_();
+        return cfg_;
+    }
+
+    /* Mutable access to the underlying C struct. The string fields are
+     * synced here as well, so raw() after chained setters never exposes
+     * stale pointers. */
+    hx_clog_config_t& raw() {
+        sync_strings_();
+        return cfg_;
+    }
+
+private:
+    void sync_strings_() {
         cfg_.log_dir     = log_dir_.c_str();
         cfg_.file_name   = file_name_.c_str();
         cfg_.logger_name = logger_name_.c_str();
         cfg_.pattern     = pattern_.c_str();
-        return cfg_;
     }
 
-    hx_clog_config_t& raw() { return cfg_; }
-
-private:
     hx_clog_config_t cfg_;
     std::string log_dir_;
     std::string file_name_;
