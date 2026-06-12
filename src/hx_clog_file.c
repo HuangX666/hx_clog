@@ -85,18 +85,19 @@ static int file_flush(hx_clog_sink_t* sink) {
 
 static void file_close(hx_clog_sink_t* sink) {
     struct hx_file_sink_impl* fs = (struct hx_file_sink_impl*)sink->impl;
-    if (!fs) {
-        return;
+    if (fs) {
+        hx_mutex_lock(&fs->lock);
+        if (fs->fp) {
+            fflush(fs->fp);
+            fclose(fs->fp);
+            fs->fp = NULL;
+        }
+        hx_mutex_unlock(&fs->lock);
+        hx_mutex_destroy(&fs->lock);
+        hx_clog__free(fs);
     }
-    hx_mutex_lock(&fs->lock);
-    if (fs->fp) {
-        fflush(fs->fp);
-        fclose(fs->fp);
-        fs->fp = NULL;
-    }
-    hx_mutex_unlock(&fs->lock);
-    hx_mutex_destroy(&fs->lock);
-    hx_clog__free(fs);
+    /* close owns both impl and the sink struct, like every other sink */
+    hx_clog__free(sink);
 }
 
 static const hx_clog_sink_vtable_t k_file_vtable = {
