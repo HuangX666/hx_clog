@@ -1,5 +1,7 @@
 # hx_clog Crash Handling
 
+[English](crash.md) | [中文](zh-CN/crash.md)
+
 Crash capture is conservative: after a fatal signal / unhandled exception the
 process may be in a damaged state, so the handler only does low-level work and
 writes a report using raw file I/O.

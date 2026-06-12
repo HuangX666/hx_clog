@@ -1,6 +1,8 @@
 # hx_clog
 
-一个面向 **C / C++11** 项目的跨平台日志框架，核心接口保持 C ABI，适合嵌入式、服务端、客户端、工具程序、游戏和音视频等场景接入。默认推荐使用 C 接口；C++11 接口是轻量 RAII 封装层，不影响纯 C 项目使用。
+[English](README.md) | [中文](README.zh-CN.md)
+
+A portable logging framework for **C / C++11** projects. The core public API keeps a stable C ABI, making it suitable for embedded software, services, desktop clients, tools, games, audio/video applications, and cross-language bindings. The recommended integration path is the C API; the C++11 layer is a lightweight RAII wrapper on top of the same C API and does not affect pure C users.
 
 [![CI](https://github.com/HuangX666/hx_clog/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/HuangX666/hx_clog/actions/workflows/ci.yml)
 [![CMake](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake&logoColor=white)](CMakeLists.txt)
@@ -9,79 +11,79 @@
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20iOS-brightgreen)](.github/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## 项目概览
+## Project overview
 
-| 项目 | 说明 |
+| Item | Description |
 | --- | --- |
-| 核心语言 | C99，公开 C ABI |
-| 可选封装 | C++11 RAII wrapper |
-| 构建系统 | CMake 3.16+ |
-| 支持平台 | Windows、Linux、macOS；CI smoke build 覆盖 Android arm64-v8a / iOS arm64 |
-| 输出目标 | Console、File、Rotate File、Syslog、Windows Event Log、Android logcat、Apple os_log、自定义 callback |
-| 写入模式 | 同步 / 异步，支持阻塞、丢弃新日志、丢弃旧日志等队列溢出策略 |
-| 格式化 | pattern、自定义 formatter、JSON 输出 |
-| 可靠性 | 文件轮转、启动轮转、时间间隔轮转、崩溃日志、最后 N 条日志 ring buffer |
-| 扩展点 | sink、formatter、allocator、命名 logger、线程本地 context |
+| Core language | C99, public C ABI |
+| Optional wrapper | C++11 RAII wrapper |
+| Build system | CMake 3.16+ |
+| Supported platforms | Windows, Linux, macOS; CI smoke builds cover Android arm64-v8a / iOS arm64 |
+| Output targets | Console, File, Rotate File, Syslog, Windows Event Log, Android logcat, Apple os_log, custom callback |
+| Write modes | Sync / async, with blocking, drop-new, and drop-old queue overflow strategies |
+| Formatting | pattern, custom formatter, JSON output |
+| Reliability | File rotation, startup rotation, interval rotation, crash logs, last-N log ring buffer |
+| Extension points | sink, formatter, allocator, named logger, thread-local context |
 
-## CI/CD 状态
+## CI/CD status
 
-当前 `master` 分支已接入 GitHub Actions，README 顶部的 CI 徽章会实时展示测试结果。
+The current `master` branch is connected to GitHub Actions. The CI badge at the top of this README shows the test result in real time.
 
-| Workflow | 覆盖范围 |
+| Workflow | Coverage |
 | --- | --- |
-| `build-and-test` | Ubuntu / Windows / macOS，Debug / Release，全量构建 examples + tests |
-| `ctest` | format、rotate、large line、features、rotate time、crash、async、C++11 wrapper、UTF-8 路径 |
-| `linux-arm` | ubuntu-24.04-arm（aarch64）真机构建并运行全部测试 |
-| `sanitizers` | ASan+UBSan 与 TSan 两套构建跑全量测试 |
-| `options-matrix` | `ASYNC=OFF` / `CRASH=OFF` / `ZLIB=OFF` / shared 等编译门控组合验证 |
-| `packaging-smoke` | Linux Release 安装包 smoke test，验证导出的 CMake package 和 public headers |
-| `mobile-smoke` | Android arm64-v8a 和 iOS arm64 交叉编译 smoke build（含 crash handler） |
-| Linux syslog check | CI 中启用 `HX_CLOG_ENABLE_SYSLOG=ON` 编译 syslog sink 路径 |
+| `build-and-test` | Ubuntu / Windows / macOS, Debug / Release, full examples + tests build |
+| `ctest` | format, rotate, large line, features, rotate time, crash, async, C++11 wrapper, UTF-8 paths |
+| `linux-arm` | Native ubuntu-24.04-arm (aarch64) build and full test run |
+| `sanitizers` | ASan+UBSan and TSan full-test builds |
+| `options-matrix` | `ASYNC=OFF` / `CRASH=OFF` / `ZLIB=OFF` / shared and other compile-gating combinations |
+| `packaging-smoke` | Linux Release install-package smoke test for exported CMake package and public headers |
+| `mobile-smoke` | Android arm64-v8a and iOS arm64 cross-compile smoke builds with crash handler enabled |
+| Linux syslog check | Builds the syslog sink path with `HX_CLOG_ENABLE_SYSLOG=ON` |
 
-## 1.1.0 变更摘要
+## 1.1.0 change summary
 
-**修复**
+**Fixes**
 
-- `hx_get_tid` 不再硬编码 x86-64 系统调用号，ARM Linux / Android 上线程 ID 正确（`SYS_gettid`）。
-- Windows 全部文件操作改用 UTF-16 宽字符 API，UTF-8（含中文）日志目录和文件名在任意系统代码页下可用（`test_utf8path` 覆盖）。
-- 崩溃处理器信号安全化：移除 `popen`/`addr2line`，符号化只用 `dladdr`（模块+偏移，离线解析）；Windows filter 不再调用 `hx_clog_flush()`（崩溃线程持锁时会自死锁）；POSIX 增加 `sigaltstack`，栈溢出也能产出报告。
-- 异步引擎关闭竞态修复：同步原语只建不毁，`running/stop` 全部在锁内判定；单条超大行占用的 slot 缓冲在复用时收缩。
-- `hx_clog_init` / `hx_clog_shutdown` / `hx_clog_reconfigure` 之间串行化（并发调用安全）。
-- 热路径不再为复制 pattern 而加锁（线程本地格式缓存，配置变更按代数惰性刷新）。
-- 轮转 cleanup 不再使用 ~140KB 静态缓冲（线程安全 + 不常驻内存）；每日轮转归档名按文件打开日期推断，跨多天空闲不再错标日期。
-- JSON 模式长消息重试容量按转义膨胀（6x）计算，不再截成非法 JSON。
-- 定时 flush 改用单调时钟（系统时间回拨不再卡住异步刷盘）。
-- macOS `HX_CLOG_ENABLE_SYSLOG=ON` 现在真正生效；`ENABLE_COLOR/STACKTRACE/SYMBOLIZE/MINIDUMP` 等 CMake 开关真正接入代码门控并决定默认行为。
+- `hx_get_tid` no longer hardcodes the x86-64 syscall number, so thread IDs are correct on ARM Linux / Android (`SYS_gettid`).
+- All Windows file operations now use UTF-16 wide-character APIs, so UTF-8 log directories and file names, including Chinese names, work under any system codepage (`test_utf8path` covers this).
+- Crash handling is now signal-safe: `popen`/`addr2line` were removed; symbolization only uses `dladdr` (module + offset, offline resolution); the Windows filter no longer calls `hx_clog_flush()` because the crashing thread may hold a lock and deadlock itself; POSIX adds `sigaltstack`, so stack overflow can still produce a report.
+- Async engine shutdown races were fixed: synchronization primitives are created once and never destroyed, `running/stop` are checked under the lock, and oversized slot buffers shrink when reused.
+- `hx_clog_init`, `hx_clog_shutdown`, and `hx_clog_reconfigure` are serialized, making concurrent calls safe.
+- The hot path no longer locks just to copy the pattern; it uses a thread-local format cache refreshed lazily by generation.
+- Rotation cleanup no longer uses an approximately 140 KB static buffer, improving thread safety and avoiding resident memory; daily rotation archive names are inferred from the file-open date, avoiding wrong dates after multi-day idle gaps.
+- JSON mode retries long-message capacity based on escaped expansion (6x), so it no longer truncates into invalid JSON.
+- Timed flush uses a monotonic clock, so system clock rollback no longer stalls async flushing.
+- macOS `HX_CLOG_ENABLE_SYSLOG=ON` now truly takes effect; CMake switches such as `ENABLE_COLOR/STACKTRACE/SYMBOLIZE/MINIDUMP` are wired into code gates and defaults.
 
-**新增**
+**New**
 
-- per-sink 格式覆盖：`hx_clog_set_sink_pattern` / `hx_clog_set_sink_format_mode`（同步、异步皆可，例如文件走 pattern、回调 sink 走 JSON）。
-- 内部错误回调 `hx_clog_set_error_handler`（sink 创建失败、文件打开/轮转失败、异步丢弃节流上报）。
-- 重复日志折叠 `hx_clog_set_duplicate_suppression`（"last message repeated N times"）。
-- 崩溃报告用户回调 `hx_clog_set_crash_callback`（向报告追加业务上下文，要求 async-signal-safe）。
-- 整点对齐轮转 `cfg.rotate_align`（如 3600 → 整点切割）；`.gz` 备份数量上限 `cfg.max_compressed_files`（0 = 沿用 `max_backup_files`）。
-- Android / iOS 崩溃处理（Android 用 `_Unwind_Backtrace`），移动端 CI 不再关闭 crash。
-- `hx_clog_after_fork_child` 完整化：重建全部内部锁并重启异步 worker。
-- pkg-config 文件（`hx_clog.pc`）；C++ 封装支持 `{{`/`}}` 转义与 C++20 `std::source_location`。
+- Per-sink format overrides: `hx_clog_set_sink_pattern` / `hx_clog_set_sink_format_mode` (works in sync and async mode; for example, file sink uses pattern while callback sink uses JSON).
+- Internal error callback `hx_clog_set_error_handler` for sink creation failures, file open/rotation failures, and throttled async-drop reporting.
+- Duplicate log suppression `hx_clog_set_duplicate_suppression` (`"last message repeated N times"`).
+- Crash report user callback `hx_clog_set_crash_callback`, for appending business context to the report; it must be async-signal-safe.
+- Aligned interval rotation `cfg.rotate_align` (for example, 3600 means rotate on the hour); `.gz` backup count cap `cfg.max_compressed_files` (0 = reuse `max_backup_files`).
+- Android / iOS crash handling (Android uses `_Unwind_Backtrace`), and mobile CI no longer disables crash.
+- Complete `hx_clog_after_fork_child`: rebuilds all internal locks and restarts the async worker.
+- pkg-config file (`hx_clog.pc`); C++ wrapper support for `{{`/`}}` escaping and C++20 `std::source_location`.
 
-> 注：`hx_clog_config_t` 在尾部新增了 `rotate_align` / `max_compressed_files` 字段，源码兼容（请始终先调用 `hx_clog_config_default()`），但二进制层面需要重新编译使用方。
+> Note: `hx_clog_config_t` gained `rotate_align` / `max_compressed_files` at the end. Source compatibility is preserved when callers always call `hx_clog_config_default()` first, but binary users must rebuild.
 
-## 功能亮点
+## Feature highlights
 
-| 能力 | 说明 |
+| Capability | Description |
 | --- | --- |
-| C 优先 | 公开 API 使用 C ABI，方便 C、C++、Rust、Go、Python FFI 或扩展层接入 |
-| 跨平台 | Windows / Linux / macOS CI 全覆盖，平台相关 sink 通过条件编译启用 |
-| 同步和异步 | 小工具可用同步模式，服务端可用异步队列降低业务线程 IO 阻塞 |
-| 多 logger | 支持默认 logger、命名 logger、独立 logger level 和 `HX_LOG_NAMED_*` 宏 |
-| 上下文日志 | 支持 thread-local context，pattern 中用 `%x` 输出，JSON 中自动携带 |
-| 多格式输出 | 内置 pattern、JSON formatter，也可注册自定义 formatter |
-| 多输出目标 | 控制台、文件、轮转文件、系统日志和自定义 callback sink |
-| 文件轮转 | 支持按大小、按天、按时间间隔、启动时归档旧 active 文件，超出保留数量的旧备份可用 zlib 压缩为 `.gz` |
-| 崩溃日志 | 支持 SEH / POSIX signal 捕获、调用栈、寄存器 dump、最后日志保护 |
-| 运行时配置 | 支持运行时修改级别、pattern、formatter、format mode 和重建内置 sinks |
+| C first | Public API uses a C ABI, making it easy to integrate from C, C++, Rust, Go, Python FFI, or extension layers |
+| Cross-platform | Windows / Linux / macOS CI coverage, with platform-specific sinks enabled through conditional compilation |
+| Sync and async | Small tools can use sync mode; services can use async queues to reduce business-thread I/O blocking |
+| Multiple loggers | Supports default logger, named loggers, independent logger levels, and `HX_LOG_NAMED_*` macros |
+| Context logs | Supports thread-local context; `%x` emits it in pattern mode and JSON carries it automatically |
+| Multiple formats | Built-in pattern and JSON formatters, plus custom formatter registration |
+| Multiple output targets | Console, file, rotating file, system logs, and custom callback sinks |
+| File rotation | Supports size, daily, interval, and startup rotation; old backups beyond the retention count can be compressed to `.gz` with zlib |
+| Crash logs | Supports SEH / POSIX signal capture, stack traces, register dumps, and recent-log protection |
+| Runtime configuration | Supports runtime changes to level, pattern, formatter, format mode, and rebuilding built-in sinks |
 
-## 快速开始
+## Quick start
 
 ```sh
 cmake -S . -B build -DHX_CLOG_BUILD_EXAMPLES=ON -DHX_CLOG_BUILD_TESTS=ON
@@ -89,7 +91,7 @@ cmake --build build --config Debug --parallel
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-### C 最小示例
+### Minimal C example
 
 ```c
 #include "hx_clog.h"
@@ -116,7 +118,7 @@ int main(void) {
 }
 ```
 
-### C++11 最小示例
+### Minimal C++11 example
 
 ```cpp
 #include "hx_clog_cpp.hpp"
@@ -138,52 +140,53 @@ int main() {
 }
 ```
 
-## 文档导航
+## Documentation
 
-| 文档 | 内容 |
-| --- | --- |
-| [docs/api.md](docs/api.md) | API、logger、formatter、sink、轮转、环境变量 |
-| [docs/design.md](docs/design.md) | 模块划分、写入路径、线程模型、内存策略 |
-| [docs/crash.md](docs/crash.md) | Crash handler、minidump、stacktrace、last-N logs |
-| [docs/ci.md](docs/ci.md) | GitHub Actions、平台矩阵、本地验证命令 |
+| Topic | English | Chinese |
+| --- | --- | --- |
+| README | [README.md](README.md) | [README.zh-CN.md](README.zh-CN.md) |
+| API, logger, formatter, sink, rotation, environment variables | [docs/api.md](docs/api.md) | [docs/zh-CN/api.md](docs/zh-CN/api.md) |
+| Module layout, write path, threading model, memory strategy | [docs/design.md](docs/design.md) | [docs/zh-CN/design.md](docs/zh-CN/design.md) |
+| Crash handler, minidump, stacktrace, last-N logs | [docs/crash.md](docs/crash.md) | [docs/zh-CN/crash.md](docs/zh-CN/crash.md) |
+| GitHub Actions, platform matrix, local verification commands | [docs/ci.md](docs/ci.md) | [docs/zh-CN/ci.md](docs/zh-CN/ci.md) |
 
 ---
 
-下面保留完整的详细设计说明，方便继续查看架构、API 和实现细节。
+The complete detailed design notes are kept below for architecture, API, and implementation reference.
 
-## 1. 项目定位
+## 1. Project positioning
 
-`hx_clog` 是一个面向 C / C++11 项目的跨平台日志框架，目标是在嵌入式、服务端、客户端、工具程序和游戏/音视频等场景中提供统一、可靠、易接入的日志能力。
+`hx_clog` is a cross-platform logging framework for C / C++11 projects. Its goal is to provide unified, reliable, and easy-to-adopt logging for embedded systems, services, desktop clients, tools, games, audio/video applications, and similar scenarios.
 
-它应该具备以下特点：
+It should provide the following characteristics:
 
-| 能力 | 说明 |
+| Capability | Description |
 | --- | --- |
-| C 优先 | 核心接口使用 C ABI，方便被 C、C++、Rust、Go、Python 扩展层调用 |
-| 跨平台 | 支持 Windows、Linux、macOS，预留 Android、iOS、嵌入式适配点 |
-| 同步日志 | 调用线程直接写日志，简单可靠，适合小工具和调试阶段 |
-| 异步日志 | 后台线程批量写入，降低业务线程 IO 阻塞 |
-| 日志轮转 | 支持按文件大小、日期、启动次数进行轮转 |
-| 多输出目标 | 控制台、普通文件、滚动文件、系统日志、自定义回调 |
-| 崩溃日志 | 捕获 crash 信息，尽量输出最后日志、调用栈、信号/异常信息 |
-| 可配置 | 支持运行时配置日志级别、格式、输出目标、队列大小等 |
-| 低侵入 | 一个头文件即可使用基础能力，CMake 可选择静态库/动态库 |
-| 可扩展 | sink、formatter、allocator、clock、thread 等模块可替换 |
+| C first | Core interfaces use a C ABI, making them easy to call from C, C++, Rust, Go, Python extension layers, and similar integrations |
+| Cross-platform | Supports Windows, Linux, and macOS, with reserved adaptation points for Android, iOS, and embedded platforms |
+| Sync logging | The calling thread writes logs directly; simple and reliable, suitable for small tools and debugging |
+| Async logging | A background thread writes in batches, reducing business-thread I/O blocking |
+| Log rotation | Supports rotation by file size, date, and startup count |
+| Multiple outputs | Console, plain file, rolling file, system log, custom callback |
+| Crash logging | Captures crash information and tries to output recent logs, stack trace, and signal/exception details |
+| Configurable | Supports runtime configuration for log level, format, output target, queue size, and more |
+| Low intrusion | Basic capability is available through one header; CMake can build a static or shared library |
+| Extensible | Modules such as sink, formatter, allocator, clock, and thread can be replaced |
 
-## 2. 总体架构
+## 2. Overall architecture
 
-### 2.1 分层设计
+### 2.1 Layered design
 
 ```mermaid
 flowchart TD
-    A["业务代码<br/>C / C++ / 其它语言绑定"] --> B["hx_clog API<br/>C ABI"]
-    B --> C["Logger 管理层<br/>级别、分类、上下文"]
-    C --> D["Formatter 格式化层<br/>时间、线程、文件、行号"]
-    D --> E{"写入模式"}
-    E -->|同步| F["Sync Writer<br/>直接写 sink"]
-    E -->|异步| G["Async Queue<br/>无锁/轻锁队列"]
-    G --> H["Worker Thread<br/>批量落盘"]
-    F --> I["Sink 输出层"]
+    A["Application code<br/>C / C++ / other language bindings"] --> B["hx_clog API<br/>C ABI"]
+    B --> C["Logger management layer<br/>level, category, context"]
+    C --> D["Formatter layer<br/>time, thread, file, line"]
+    D --> E{"Write mode"}
+    E -->|Sync| F["Sync Writer<br/>write directly to sinks"]
+    E -->|Async| G["Async Queue<br/>lock-free/light-lock queue"]
+    G --> H["Worker Thread<br/>batch flush"]
+    F --> I["Sink output layer"]
     H --> I
     I --> J["Console Sink"]
     I --> K["File Sink"]
@@ -192,28 +195,28 @@ flowchart TD
     I --> N["Custom Sink"]
 ```
 
-### 2.2 核心模块
+### 2.2 Core modules
 
-| 模块 | 职责 |
+| Module | Responsibility |
 | --- | --- |
-| `hx_clog.h` | 对外 C 接口、宏、类型定义 |
-| `hx_clog_core.c` | logger 生命周期、全局配置、级别过滤 |
-| `hx_clog_format.c` | 日志格式化、时间格式、线程 ID、源码位置 |
-| `hx_clog_sink.c` | sink 抽象层，统一输出接口 |
-| `hx_clog_file.c` | 文件打开、写入、flush、fsync、路径处理 |
-| `hx_clog_rotate.c` | 日志轮转和历史文件清理 |
-| `hx_clog_async.c` | 异步队列、后台线程、批量写入、退出 drain |
-| `hx_clog_crash.c` | 崩溃捕获、最后日志保护、调用栈记录 |
-| `hx_clog_cpp.hpp` | 可选 C++11 RAII 封装，内部仍调用 C API |
+| `hx_clog.h` | Public C interface, macros, type definitions |
+| `hx_clog_core.c` | logger lifecycle, global configuration, level filtering |
+| `hx_clog_format.c` | Log formatting, time formatting, thread ID, source location |
+| `hx_clog_sink.c` | Sink abstraction layer and unified output interface |
+| `hx_clog_file.c` | File open, write, flush, fsync, path handling |
+| `hx_clog_rotate.c` | Log rotation and history cleanup |
+| `hx_clog_async.c` | Async queue, background thread, batched writes, shutdown drain |
+| `hx_clog_crash.c` | Crash capture, recent-log protection, stack trace recording |
+| `hx_clog_cpp.hpp` | Optional C++11 RAII wrapper; internally still calls the C API |
 
-## 3. 推荐目录结构
+## 3. Recommended directory layout
 
 ```text
 hx_clog/
 ├── CMakeLists.txt
 ├── include/
 │   ├── hx_clog.h
-│   └── hx_clog_cpp.hpp        # 可选
+│   └── hx_clog_cpp.hpp        # optional
 ├── src/
 │   ├── hx_clog_core.c
 │   ├── hx_clog_format.c
@@ -240,34 +243,34 @@ hx_clog/
     └── crash.md
 ```
 
-## 4. 日志级别
+## 4. Log levels
 
-建议提供 6 个常用级别，并保留关闭日志的级别：
+The library should provide six common levels and one level for disabling logs:
 
-| 级别 | 典型用途 |
+| Level | Typical use |
 | --- | --- |
-| `HX_CLOG_TRACE` | 极细粒度调试信息，例如函数进入/退出 |
-| `HX_CLOG_DEBUG` | 开发阶段调试信息 |
-| `HX_CLOG_INFO` | 关键业务流程、启动参数、状态变化 |
-| `HX_CLOG_WARN` | 可恢复异常、配置缺失、重试 |
-| `HX_CLOG_ERROR` | 操作失败、请求失败、资源不可用 |
-| `HX_CLOG_FATAL` | 严重错误，可能需要退出程序 |
-| `HX_CLOG_OFF` | 关闭日志 |
+| `HX_CLOG_TRACE` | Very fine-grained debug information, such as function enter/exit |
+| `HX_CLOG_DEBUG` | Development-time debug information |
+| `HX_CLOG_INFO` | Key business flow, startup parameters, state changes |
+| `HX_CLOG_WARN` | Recoverable exceptions, missing configuration, retries |
+| `HX_CLOG_ERROR` | Operation failure, request failure, unavailable resource |
+| `HX_CLOG_FATAL` | Severe error that may require process exit |
+| `HX_CLOG_OFF` | Disable logging |
 
-级别过滤建议尽早发生：
+Level filtering should happen as early as possible:
 
 ```mermaid
 flowchart LR
-    A["HX_CLOG_INFO(...)"] --> B{"当前级别允许?"}
-    B -->|否| C["直接返回<br/>不格式化、不分配内存"]
-    B -->|是| D["采集上下文"]
-    D --> E["格式化"]
-    E --> F["写入 sink"]
+    A["HX_CLOG_INFO(...)"] --> B{"Current level allows it?"}
+    B -->|No| C["Return immediately<br/>no formatting, no allocation"]
+    B -->|Yes| D["Capture context"]
+    D --> E["Format"]
+    E --> F["Write to sink"]
 ```
 
-## 5. C API 设计
+## 5. C API design
 
-### 5.1 基础类型
+### 5.1 Basic types
 
 ```c
 typedef enum hx_clog_level {
@@ -293,47 +296,47 @@ typedef enum hx_clog_rotate_policy {
 } hx_clog_rotate_policy_t;
 ```
 
-### 5.2 配置结构
+### 5.2 Configuration structure
 
 ```c
 typedef struct hx_clog_config {
-    const char* logger_name;       /* 默认 "hx_clog" */
-    const char* log_dir;           /* 默认 "./logs" */
-    const char* file_name;         /* 默认 "app.log" */
-    hx_clog_level_t level;         /* 默认 INFO */
-    hx_clog_mode_t mode;           /* 默认 SYNC */
+    const char* logger_name;       /* default "hx_clog" */
+    const char* log_dir;           /* default "./logs" */
+    const char* file_name;         /* default "app.log" */
+    hx_clog_level_t level;         /* default INFO */
+    hx_clog_mode_t mode;           /* default SYNC */
 
-    int enable_console;            /* 默认 1 */
-    int enable_file;               /* 默认 1 */
-    int enable_color;              /* 默认 1，仅控制台 */
-    int enable_crash_handler;      /* 默认 0，显式开启 */
+    int enable_console;            /* default 1 */
+    int enable_file;               /* default 1 */
+    int enable_color;              /* default 1, console only */
+    int enable_crash_handler;      /* default 0, explicitly enabled */
 
     hx_clog_rotate_policy_t rotate_policy;
-    unsigned long long max_file_size;  /* 例如 10 * 1024 * 1024 */
-    int max_backup_files;              /* 例如 10 */
-    int rotate_daily;                  /* 是否按天切分 */
+    unsigned long long max_file_size;  /* for example 10 * 1024 * 1024 */
+    int max_backup_files;              /* for example 10 */
+    int rotate_daily;                  /* whether to split by day */
 
-    unsigned int async_queue_size;     /* 默认 8192 */
-    unsigned int async_batch_size;     /* 默认 64 */
-    unsigned int flush_interval_ms;    /* 默认 1000 */
+    unsigned int async_queue_size;     /* default 8192 */
+    unsigned int async_batch_size;     /* default 64 */
+    unsigned int flush_interval_ms;    /* default 1000 */
 
-    const char* pattern;               /* 默认内置格式 */
+    const char* pattern;               /* built-in default format */
 } hx_clog_config_t;
 ```
 
-> **关于目录与文件名**
+> **About directories and file names**
 >
-> - `log_dir` 支持多级相对/绝对路径（如 `"test/logs"`、`"./var/log/app"`），
->   `hx_clog_init()` 时会**自动递归创建**所有不存在的中间目录（`/` 和 `\`
->   两种分隔符都识别，已存在的目录会跳过）。
-> - `file_name` 应当是**纯文件名**（如 `"app.log"`），不要把子目录塞进
->   `file_name`。需要子目录时请写到 `log_dir` 里：
+> - `log_dir` supports multi-level relative or absolute paths (for example `"test/logs"` and `"./var/log/app"`).
+>   `hx_clog_init()` will **recursively create** all missing intermediate directories (`/` and `\`
+>   are both recognized; existing directories are skipped).
+> - `file_name` should be a **plain file name** (for example `"app.log"`). Do not put
+>   subdirectories into `file_name`. Put subdirectories in `log_dir` instead:
 >   ```c
->   cfg.log_dir   = "test/logs";   /* 会递归创建 test、test/logs */
+>   cfg.log_dir   = "test/logs";   /* recursively creates test and test/logs */
 >   cfg.file_name = "xxx.log";
 >   ```
 
-### 5.3 生命周期接口
+### 5.3 Lifecycle APIs
 
 ```c
 int hx_clog_init(const hx_clog_config_t* config);
@@ -343,10 +346,10 @@ void hx_clog_flush(void);
 void hx_clog_set_level(hx_clog_level_t level);
 hx_clog_level_t hx_clog_get_level(void);
 
-int hx_clog_reopen(void);  /* logrotate 或外部移动文件后重新打开 */
+int hx_clog_reopen(void);  /* reopen after logrotate or external file move */
 ```
 
-### 5.4 写日志接口
+### 5.4 Write APIs
 
 ```c
 void hx_clog_write(
@@ -368,7 +371,7 @@ void hx_clog_writev(
 );
 ```
 
-### 5.5 推荐宏
+### 5.5 Recommended macros
 
 ```c
 #define HX_LOG_TRACE(fmt, ...) \
@@ -390,11 +393,11 @@ void hx_clog_writev(
     hx_clog_write(HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 ```
 
-> Windows MSVC 老版本对 `##__VA_ARGS__` 支持不一致时，可以额外提供 `HX_LOG_INFO0("message")` 或使用 C99/C++20 兼容宏方案。
+> Older Windows MSVC versions have inconsistent support for `##__VA_ARGS__`. In that case, provide extra helpers such as `HX_LOG_INFO0("message")` or use a C99/C++20-compatible macro strategy.
 
-## 6. C 使用示例
+## 6. C usage examples
 
-### 6.1 最小接入
+### 6.1 Minimal integration
 
 ```c
 #include "hx_clog.h"
@@ -420,7 +423,7 @@ int main(void) {
 }
 ```
 
-### 6.2 异步日志
+### 6.2 Async logging
 
 ```c
 hx_clog_config_t config;
@@ -433,10 +436,10 @@ config.flush_interval_ms = 500;
 
 hx_clog_init(&config);
 HX_LOG_INFO("async logging enabled");
-hx_clog_shutdown(); /* shutdown 时必须 drain 队列 */
+hx_clog_shutdown(); /* drain the queue during shutdown */
 ```
 
-### 6.3 日志轮转
+### 6.3 Log rotation
 
 ```c
 hx_clog_config_t config;
@@ -450,11 +453,11 @@ config.rotate_daily = 1;
 hx_clog_init(&config);
 ```
 
-## 7. C++11 可选封装
+## 7. Optional C++11 wrapper
 
-C++11 封装层建议只做易用性增强，不重新实现核心逻辑。
+The C++11 wrapper should only improve usability; it should not reimplement core logic.
 
-### 7.1 RAII 管理
+### 7.1 RAII management
 
 ```cpp
 #include "hx_clog_cpp.hpp"
@@ -468,125 +471,125 @@ int main() {
     hx::clog::Logger logger(config);
 
     HX_LOG_INFO("C macro still works");
-    logger.info("C++ wrapper message: {}", "hello"); // 可选 fmt 风格
+    logger.info("C++ wrapper message: {}", "hello"); // optional fmt style
 }
 ```
 
-### 7.2 C++ 封装边界
+### 7.2 C++ wrapper boundaries
 
-| 内容 | 建议 |
+| Item | Recommendation |
 | --- | --- |
-| 生命周期 | 使用 RAII 自动 `init/shutdown` |
-| 字符串 | 接受 `std::string`，内部转为 `const char*` |
-| 格式化 | 可选接入 `{fmt}`，不开启时仍使用 C `printf` 风格 |
-| 异常 | 默认不抛异常，使用错误码；可通过宏开启异常 |
-| ABI | 不导出 C++ ABI，库核心保持 C ABI 稳定 |
+| Lifecycle | Use RAII to call `init/shutdown` automatically |
+| Strings | Accept `std::string` and convert internally to `const char*` |
+| Formatting | Optionally integrate `{fmt}`; when disabled, still use C `printf` style |
+| Exceptions | Do not throw by default; use error codes, with optional macro-enabled exceptions |
+| ABI | Do not export a C++ ABI; keep the core library C ABI stable |
 
-## 8. 日志格式
+## 8. Log format
 
-### 8.1 默认格式
+### 8.1 Default format
 
 ```text
 2026-06-07 15:04:05.123 [INFO ] [tid:12345] main.c:28 main() - server started, port=8080
 ```
 
-字段说明：
+Field descriptions:
 
-| 字段 | 示例 | 说明 |
+| Field | Example | Description |
 | --- | --- | --- |
-| 时间 | `2026-06-07 15:04:05.123` | 本地时间，毫秒精度 |
-| 级别 | `[INFO ]` | 固定宽度，便于对齐 |
-| 线程 | `[tid:12345]` | 多线程定位问题 |
-| 源码 | `main.c:28 main()` | 文件、行号、函数名 |
-| 消息 | `server started` | 用户日志内容 |
+| Time | `2026-06-07 15:04:05.123` | Local time with millisecond precision |
+| Level | `[INFO ]` | Fixed width for alignment |
+| Thread | `[tid:12345]` | Helps diagnose multi-threaded issues |
+| Source | `main.c:28 main()` | File, line number, function name |
+| Message | `server started` | User log content |
 
-### 8.2 pattern 语法
+### 8.2 Pattern syntax
 
-建议支持类似如下占位符：
+Suggested placeholders:
 
-| 占位符 | 含义 |
+| Placeholder | Meaning |
 | --- | --- |
-| `%Y-%m-%d %H:%M:%S.%e` | 日期时间，毫秒 |
-| `%l` | 日志级别 |
-| `%t` | 线程 ID |
-| `%p` | 进程 ID |
-| `%s` | 源文件名（仅文件名，basename） |
-| `%F` | 源文件完整路径（`__FILE__` 原样） |
-| `%#` | 行号 |
-| `%!` | 函数名 |
-| `%v` | 日志正文 |
-| `%n` | 换行 |
-| `%%` | 字面量百分号 |
+| `%Y-%m-%d %H:%M:%S.%e` | Date and time, milliseconds |
+| `%l` | Log level |
+| `%t` | Thread ID |
+| `%p` | Process ID |
+| `%s` | Source file name (basename only) |
+| `%F` | Full source file path (raw `__FILE__`) |
+| `%#` | Line number |
+| `%!` | Function name |
+| `%v` | Log message |
+| `%n` | Newline |
+| `%%` | Literal percent sign |
 
-示例：
+Example:
 
 ```text
 [%Y-%m-%d %H:%M:%S.%e] [%l] [pid:%p tid:%t] [%s:%#] %v%n
 ```
 
-## 9. 同步日志设计
+## 9. Sync logging design
 
-同步日志是最简单可靠的模式：
+Sync logging is the simplest and most reliable mode:
 
 ```mermaid
 sequenceDiagram
-    participant App as 业务线程
+    participant App as Application thread
     participant API as hx_clog_write
     participant Fmt as Formatter
     participant Sink as File/Console Sink
 
     App->>API: HX_LOG_INFO(...)
-    API->>API: 级别过滤
-    API->>Fmt: 格式化日志
-    Fmt-->>API: 格式化后的文本
-    API->>Sink: 直接写入
-    Sink-->>API: 写入结果
-    API-->>App: 返回
+    API->>API: Level filter
+    API->>Fmt: Format log
+    Fmt-->>API: Formatted text
+    API->>Sink: Direct write
+    Sink-->>API: Write result
+    API-->>App: Return
 ```
 
-优点：
+Advantages:
 
-- 实现简单，行为可预测。
-- crash 前最后一条日志更容易落盘。
-- 适合 CLI 工具、测试程序、嵌入式小程序。
+- Simple implementation and predictable behavior.
+- The last log before a crash is more likely to reach disk.
+- Suitable for CLI tools, test programs, and small embedded programs.
 
-缺点：
+Disadvantages:
 
-- 文件 IO 可能阻塞业务线程。
-- 高频日志场景下吞吐量较低。
+- File I/O can block business threads.
+- Throughput is lower in high-frequency logging scenarios.
 
-## 10. 异步日志设计
+## 10. Async logging design
 
-异步日志通过队列和后台线程降低调用线程延迟：
+Async logging reduces caller latency through a queue and background thread:
 
 ```mermaid
 sequenceDiagram
-    participant App as 业务线程
+    participant App as Application thread
     participant API as hx_clog_write
     participant Q as Async Queue
-    participant Worker as 后台写线程
+    participant Worker as Background writer thread
     participant Sink as File Sink
 
     App->>API: HX_LOG_INFO(...)
-    API->>API: 级别过滤和格式化
+    API->>API: Level filter and formatting
     API->>Q: push log event
-    API-->>App: 快速返回
+    API-->>App: Fast return
     Worker->>Q: pop batch
-    Worker->>Sink: 批量写文件
-    Worker->>Sink: 定期 flush
+    Worker->>Sink: Batch file write
+    Worker->>Sink: Periodic flush
 ```
 
-### 10.1 队列策略
+### 10.1 Queue strategies
 
-异步队列满时建议支持三种策略：
+When the async queue is full, support three strategies:
 
-| 策略 | 行为 | 适用场景 |
+| Strategy | Behavior | Suitable scenario |
 | --- | --- | --- |
-| `BLOCK` | 阻塞业务线程直到有空间 | 不能丢日志的服务端 |
-| `DROP_NEW` | 丢弃当前新日志 | 低延迟系统 |
-| `DROP_OLD` | 丢弃最旧日志，保留最新状态 | UI、实时系统 |
+| `BLOCK` | Block the business thread until space is available | Services that must not lose logs |
+| `DROP_NEW` | Drop the current new log | Low-latency systems |
+| `DROP_OLD` | Drop the oldest log and preserve the latest state | UI and real-time systems |
 
-推荐默认：`BLOCK`，并提供统计计数：
+Recommended default: `BLOCK`, with stats counters:
 
 ```c
 typedef struct hx_clog_stats {
@@ -599,36 +602,36 @@ typedef struct hx_clog_stats {
 int hx_clog_get_stats(hx_clog_stats_t* stats);
 ```
 
-### 10.2 异步退出
+### 10.2 Async shutdown
 
-`hx_clog_shutdown()` 必须做完整收尾：
+`hx_clog_shutdown()` must perform a complete shutdown sequence:
 
 ```mermaid
 flowchart TD
-    A["调用 hx_clog_shutdown"] --> B["停止接受新日志"]
-    B --> C["唤醒后台线程"]
-    C --> D["drain 队列中剩余日志"]
-    D --> E["flush 所有 sink"]
-    E --> F["关闭文件句柄"]
-    F --> G["释放资源"]
+    A["Call hx_clog_shutdown"] --> B["Stop accepting new logs"]
+    B --> C["Wake background thread"]
+    C --> D["Drain remaining queued logs"]
+    D --> E["Flush all sinks"]
+    E --> F["Close file handles"]
+    F --> G["Release resources"]
 ```
 
-## 11. 日志轮转
+## 11. Log rotation
 
-### 11.1 轮转策略
+### 11.1 Rotation strategies
 
-日志轮转用于避免单个日志文件无限增长。
+Log rotation prevents a single log file from growing forever.
 
-| 策略 | 示例 | 说明 |
+| Strategy | Example | Description |
 | --- | --- | --- |
-| 按大小 | `app.log` 超过 20MB | 最常用，简单可靠 |
-| 按时间 | 每天生成 `app.2026-06-07.log` | 便于按日期归档 |
-| 大小 + 时间 | 每天文件内再按大小拆分 | 服务端推荐 |
-| 启动轮转 | 每次启动移动旧日志 | 适合客户端工具 |
+| By size | `app.log` exceeds 20 MB | Most common, simple and reliable |
+| By time | Generate `app.2026-06-07.log` every day | Convenient date-based archiving |
+| Size + time | Split each daily file again by size | Recommended for services |
+| Startup rotation | Move old logs on every start | Suitable for client tools |
 
-### 11.2 文件命名
+### 11.2 File naming
 
-推荐格式：
+Recommended format:
 
 ```text
 logs/
@@ -639,84 +642,84 @@ logs/
 └── app.2026-06-05.1.log
 ```
 
-也可以使用压缩归档：
+Compressed archives may also be used:
 
 ```text
 app.2026-06-06.1.log.gz
 ```
 
-压缩建议放到后台线程或独立维护线程中做，避免阻塞写日志。
+Compression should run in a background thread or separate maintenance thread to avoid blocking log writes.
 
-### 11.3 轮转流程
+### 11.3 Rotation flow
 
 ```mermaid
 flowchart TD
-    A["准备写入一条日志"] --> B{"是否需要轮转?"}
-    B -->|否| C["写入当前文件"]
-    B -->|是| D["flush 当前文件"]
-    D --> E["关闭当前文件"]
-    E --> F["重命名为归档文件"]
-    F --> G["创建新的 app.log"]
-    G --> H["清理过期文件"]
+    A["Prepare to write a log line"] --> B{"Need rotation?"}
+    B -->|No| C["Write current file"]
+    B -->|Yes| D["Flush current file"]
+    D --> E["Close current file"]
+    E --> F["Rename to archive file"]
+    F --> G["Create new app.log"]
+    G --> H["Clean expired files"]
     H --> C
 ```
 
-### 11.4 清理规则
+### 11.4 Cleanup rules
 
-建议同时支持：
+Support all of the following:
 
-- 保留最近 N 个文件：`max_backup_files = 30`
-- 保留最近 N 天：`max_backup_days = 7`
-- 总日志目录大小限制：`max_total_size = 1GB`
+- Keep the most recent N files: `max_backup_files = 30`
+- Keep the most recent N days: `max_backup_days = 7`
+- Total log directory size limit: `max_total_size = 1GB`
 
-清理顺序建议：
+Recommended cleanup order:
 
-1. 先删除超过天数的文件。
-2. 再按文件数量删除最旧文件。
-3. 最后按目录总大小删除最旧文件。
+1. Delete files older than the day limit first.
+2. Then delete the oldest files by file count.
+3. Finally delete the oldest files by total directory size.
 
-## 12. Crash 崩溃日志
+## 12. Crash logging
 
-崩溃处理是日志库的重要增强能力，但必须设计得保守。崩溃发生后，进程状态可能已经损坏，不能假设堆、锁、stdio 都安全。
+Crash handling is an important enhancement for a logging library, but it must be conservative. After a crash, the process state may already be corrupted, so the heap, locks, and stdio cannot be assumed safe.
 
-### 12.1 支持目标
+### 12.1 Supported targets
 
-| 平台 | 能力 |
+| Platform | Capability |
 | --- | --- |
-| Windows | 捕获 SEH 异常，生成 crash 日志，可选 MiniDump |
-| Linux | 捕获 `SIGSEGV`、`SIGABRT`、`SIGFPE`、`SIGILL`、`SIGBUS` |
-| macOS | 捕获常见 POSIX signal，预留 Mach exception 扩展 |
-| Android | 捕获 signal，可选接入 tombstone / logcat |
+| Windows | Capture SEH exceptions, generate crash logs, optional MiniDump |
+| Linux | Capture `SIGSEGV`, `SIGABRT`, `SIGFPE`, `SIGILL`, `SIGBUS` |
+| macOS | Capture common POSIX signals, reserve Mach exception extension points |
+| Android | Capture signals, optionally integrate tombstone / logcat |
 
-### 12.2 Crash 模块职责
+### 12.2 Crash module responsibilities
 
 ```mermaid
 flowchart TD
-    A["进程启动"] --> B["hx_clog_install_crash_handler"]
-    B --> C["注册平台异常处理器"]
-    C --> D["正常运行"]
-    D --> E{"发生 crash"}
-    E --> F["进入 crash handler"]
-    F --> G["写入异常类型、地址、线程信息"]
-    G --> H["尽量 flush 最后日志"]
-    H --> I["输出调用栈/寄存器/模块信息"]
-    I --> J["恢复默认处理器或退出进程"]
+    A["Process starts"] --> B["hx_clog_install_crash_handler"]
+    B --> C["Register platform exception handler"]
+    C --> D["Normal execution"]
+    D --> E{"Crash occurs"}
+    E --> F["Enter crash handler"]
+    F --> G["Write exception type, address, thread info"]
+    G --> H["Try to flush recent logs"]
+    H --> I["Output stack/register/module info"]
+    I --> J["Restore default handler or exit process"]
 ```
 
-### 12.3 崩溃精确位置与栈追踪
+### 12.3 Precise crash location and stack traces
 
-`hx_clog` 的 crash 日志不仅要说明“程序崩了”，还应该尽量说明“在哪里崩了”。理想输出应包含：
+The `hx_clog` crash log should not merely say "the program crashed"; it should also try to say "where it crashed". Ideal output includes:
 
-- 崩溃类型：例如 `SIGSEGV`、`SIGABRT`、Windows SEH `EXCEPTION_ACCESS_VIOLATION`。
-- 崩溃地址：CPU 执行到的 instruction pointer，例如 x86/x64 的 `RIP/EIP`。
-- 访问地址：例如空指针访问时的 `fault address = 0x00000000`。
-- 崩溃线程：线程 ID、线程名。
-- 精确源码位置：函数名、源文件、行号。
-- 栈追踪：从崩溃点向上回溯调用链。
-- 模块信息：可执行文件、动态库名、模块基址、偏移地址。
-- 最近日志：crash 前最后 N 条业务日志。
+- Crash type, such as `SIGSEGV`, `SIGABRT`, or Windows SEH `EXCEPTION_ACCESS_VIOLATION`.
+- Crash address: the instruction pointer where the CPU was executing, such as `RIP/EIP` on x86/x64.
+- Access address: for example `fault address = 0x00000000` for a null pointer access.
+- Crashing thread: thread ID and thread name.
+- Precise source location: function name, source file, line number.
+- Stack trace: call chain from the crash site upward.
+- Module information: executable or dynamic library name, module base address, offset address.
+- Recent logs: last N business logs before the crash.
 
-#### 12.3.1 Crash 日志输出样例
+#### 12.3.1 Crash log output example
 
 ```text
 ========== hx_clog crash report ==========
@@ -755,55 +758,55 @@ last_logs:
 ==========================================
 ```
 
-> 精确到源码文件和行号需要调试符号。Windows 需要 PDB，Linux/macOS/Android 通常需要 DWARF 调试信息。没有符号时，至少应输出模块名、地址和偏移，方便事后使用符号工具还原。
+> Precise source file and line numbers require debug symbols. Windows needs PDBs; Linux/macOS/Android usually need DWARF debug information. Without symbols, the report should at least output module name, address, and offset so symbol tools can restore the source location later.
 
-#### 12.3.2 栈追踪采集流程
+#### 12.3.2 Stack trace capture flow
 
 ```mermaid
 flowchart TD
-    A["发生 crash"] --> B["读取平台异常上下文"]
-    B --> C["提取 PC/SP/FP 等寄存器"]
-    C --> D["记录崩溃地址和访问地址"]
-    D --> E["采集原始栈帧地址"]
-    E --> F{"是否允许符号化?"}
-    F -->|是| G["地址转函数名/文件/行号"]
-    F -->|否| H["只写模块+地址+偏移"]
-    G --> I["写 crash_location"]
+    A["Crash occurs"] --> B["Read platform exception context"]
+    B --> C["Extract PC/SP/FP registers"]
+    C --> D["Record crash address and access address"]
+    D --> E["Capture raw stack frame addresses"]
+    E --> F{"Symbolization allowed?"}
+    F -->|Yes| G["Address to function/file/line"]
+    F -->|No| H["Write only module+address+offset"]
+    G --> I["Write crash_location"]
     H --> I
-    I --> J["写完整 stacktrace"]
-    J --> K["dump 最近 N 条日志"]
-    K --> L["flush 并退出/转交默认处理器"]
+    I --> J["Write full stacktrace"]
+    J --> K["Dump last N logs"]
+    K --> L["Flush and exit / chain to default handler"]
 ```
 
-#### 12.3.3 平台实现建议
+#### 12.3.3 Platform implementation suggestions
 
-| 平台 | 采集方式 | 符号化方式 |
+| Platform | Capture method | Symbolization method |
 | --- | --- | --- |
-| Windows | `SetUnhandledExceptionFilter`、Vectored Exception Handler、`CaptureStackBackTrace`、`StackWalk64` | `SymInitialize`、`SymFromAddr`、`SymGetLineFromAddr64`，配合 PDB |
-| Linux | `sigaction + SA_SIGINFO` 获取 `ucontext_t`，`backtrace` 或 `libunwind` 回溯 | `dladdr` 获取模块和符号，`addr2line` / `llvm-symbolizer` 根据 DWARF 转文件行号 |
-| macOS | `sigaction + ucontext_t`，`backtrace` 或 `_Unwind_Backtrace` | `dladdr`、`atos`、dSYM |
-| Android | `sigaction + ucontext_t`，NDK unwinder / `libunwindstack` | tombstone、`ndk-stack`、`llvm-symbolizer` |
+| Windows | `SetUnhandledExceptionFilter`, Vectored Exception Handler, `CaptureStackBackTrace`, `StackWalk64` | `SymInitialize`, `SymFromAddr`, `SymGetLineFromAddr64`, with PDB |
+| Linux | `sigaction + SA_SIGINFO` to get `ucontext_t`, `backtrace` or `libunwind` for unwinding | `dladdr` for module and symbol, `addr2line` / `llvm-symbolizer` for DWARF file and line |
+| macOS | `sigaction + ucontext_t`, `backtrace` or `_Unwind_Backtrace` | `dladdr`, `atos`, dSYM |
+| Android | `sigaction + ucontext_t`, NDK unwinder / `libunwindstack` | tombstone, `ndk-stack`, `llvm-symbolizer` |
 
-推荐实现分两层：
+Recommended implementation split:
 
-1. **crash handler 内部只采集原始信息**：异常类型、寄存器、PC、SP、FP、模块地址、栈帧地址。
-2. **符号化可以延后处理**：优先写 raw address，之后由辅助线程、子进程、外部工具或下次启动时转成文件行号。
+1. **Only collect raw information inside the crash handler**: exception type, registers, PC, SP, FP, module address, stack frame addresses.
+2. **Defer symbolization when possible**: prefer writing raw addresses first, then convert them to file and line through a helper thread, child process, external tool, or on next startup.
 
-这样可以兼顾 crash 场景的安全性和排障信息的完整性。
+This balances crash-path safety with complete diagnostic information.
 
-#### 12.3.4 精确定位所需编译选项
+#### 12.3.4 Compile options required for precise locations
 
-为了让 crash 日志能输出准确的函数、文件和行号，建议 Debug、RelWithDebInfo 和生产可诊断版本都保留调试符号。
+To let crash logs output accurate functions, files, and line numbers, keep debug symbols in Debug, RelWithDebInfo, and production diagnostic builds.
 
-| 编译器 | 推荐选项 |
+| Compiler | Recommended options |
 | --- | --- |
-| MSVC | `/Zi` 或 `/Z7`，链接时生成 PDB；Release 可使用 `/DEBUG` |
+| MSVC | `/Zi` or `/Z7`, generate PDB at link time; Release may use `/DEBUG` |
 | GCC / Clang | `-g -fno-omit-frame-pointer` |
 | MinGW | `-g -fno-omit-frame-pointer` |
-| Android NDK | `-g -fno-omit-frame-pointer`，保留 unstripped so 用于符号化 |
-| macOS / iOS | `-g`，生成并保留 dSYM |
+| Android NDK | `-g -fno-omit-frame-pointer`, keep unstripped `.so` files for symbolization |
+| macOS / iOS | `-g`, generate and keep dSYM |
 
-CMake 可提供诊断选项：
+CMake can provide diagnostic options:
 
 ```cmake
 option(HX_CLOG_ENABLE_STACKTRACE "Enable crash stacktrace capture" ON)
@@ -820,22 +823,22 @@ if(MSVC)
 endif()
 ```
 
-#### 12.3.5 地址与源码行号映射
+#### 12.3.5 Mapping addresses to source lines
 
-当 crash handler 只能安全写出地址时，日志里也要保留足够信息用于事后还原：
+When the crash handler can only safely write addresses, the log should still preserve enough information for offline restoration:
 
 ```text
 #00 module=demo_server base=0x0000000140000000 pc=0x00000001400125af offset=0x125af
 ```
 
-事后可使用：
+Offline tools:
 
 ```bash
 addr2line -e demo_server -f -C 0x125af
 llvm-symbolizer -e demo_server 0x125af
 ```
 
-Windows 可使用 PDB 和 `dbghelp` 在线解析，也可以事后用 Visual Studio、WinDbg 或 symbol server 定位。
+On Windows, PDB and `dbghelp` can be used for online resolution; Visual Studio, WinDbg, or a symbol server can be used offline.
 
 ### 12.4 Crash API
 
@@ -848,7 +851,7 @@ typedef struct hx_clog_crash_config {
     int symbolize_stacktrace;
     int stacktrace_max_depth;
     const char* symbol_search_path;
-    int create_minidump;       /* Windows 可用 */
+    int create_minidump;       /* available on Windows */
     int chain_previous_handler;
 } hx_clog_crash_config_t;
 
@@ -856,50 +859,50 @@ int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config);
 void hx_clog_uninstall_crash_handler(void);
 ```
 
-字段建议：
+Suggested fields:
 
-| 字段 | 说明 |
+| Field | Description |
 | --- | --- |
-| `dump_fault_location` | 输出崩溃点 PC、访问地址、模块偏移、源码位置 |
-| `dump_stacktrace` | 输出调用栈 |
-| `dump_registers` | 输出寄存器信息，便于底层问题分析 |
-| `symbolize_stacktrace` | 尝试把地址解析成函数名、文件、行号 |
-| `stacktrace_max_depth` | 最大栈深度，例如 64 或 128 |
-| `symbol_search_path` | PDB、dSYM 或 unstripped so 的搜索路径 |
-| `create_minidump` | Windows 下生成 `.dmp` 文件 |
-| `chain_previous_handler` | 处理后是否继续调用旧 handler |
+| `dump_fault_location` | Output crash-site PC, access address, module offset, source location |
+| `dump_stacktrace` | Output call stack |
+| `dump_registers` | Output registers for low-level analysis |
+| `symbolize_stacktrace` | Try to resolve addresses into function names, files, and line numbers |
+| `stacktrace_max_depth` | Maximum stack depth, such as 64 or 128 |
+| `symbol_search_path` | Search path for PDB, dSYM, or unstripped `.so` files |
+| `create_minidump` | Generate a `.dmp` file on Windows |
+| `chain_previous_handler` | Whether to call the previous handler after processing |
 
-### 12.5 最后日志缓冲区
+### 12.5 Last-log buffer
 
-为了让 crash 时能看到最近发生了什么，建议维护一个固定大小的环形内存缓冲区：
+To show what happened just before a crash, maintain a fixed-size in-memory ring buffer:
 
 ```mermaid
 flowchart LR
-    A["每条日志"] --> B["写入正常 sink"]
-    A --> C["复制到 last-N ring buffer"]
-    C --> D["crash 时直接 dump 到 crash.log"]
+    A["Every log line"] --> B["Write to normal sinks"]
+    A --> C["Copy to last-N ring buffer"]
+    C --> D["Dump directly to crash.log during crash"]
 ```
 
-推荐规则：
+Recommended rules:
 
-- 缓冲最近 256 到 4096 条日志。
-- 使用预分配内存，避免 crash handler 中 malloc。
-- crash handler 中只做尽量安全的低级写入。
-- 如果锁不可用，宁愿跳过部分信息，也不要死锁。
+- Buffer the most recent 256 to 4096 log lines.
+- Use preallocated memory to avoid `malloc` in the crash handler.
+- In the crash handler, only do low-level writes that are as safe as possible.
+- If a lock is unavailable, skip some information rather than deadlocking.
 
-### 12.6 Signal 安全建议
+### 12.6 Signal-safety recommendations
 
-POSIX signal handler 中只能调用 async-signal-safe 函数。不要在 signal handler 中调用复杂格式化、`malloc`、`printf`、`pthread_mutex_lock`。
+POSIX signal handlers may only call async-signal-safe functions. Do not call complex formatting, `malloc`, `printf`, or `pthread_mutex_lock` in a signal handler.
 
-推荐方式：
+Recommended approach:
 
-1. 正常运行时预格式化并保存最后 N 条日志。
-2. crash 时使用 `write()` 写入已有字节。
-3. 需要完整调用栈时，可以 fork 子进程或在崩溃前预加载 unwinder，但实现复杂度更高。
+1. Pre-format and store the last N log lines during normal execution.
+2. During crash handling, use `write()` to output existing bytes.
+3. If a full stack trace is required, fork a child process or preload an unwinder before the crash, but this increases implementation complexity.
 
 ### 12.7 Windows MiniDump
 
-Windows 下可选支持 `MiniDumpWriteDump`：
+Windows can optionally support `MiniDumpWriteDump`:
 
 ```text
 crash/
@@ -907,15 +910,15 @@ crash/
 └── crash_20260607_150405.dmp
 ```
 
-建议 CMake 选项：
+Suggested CMake option:
 
 ```cmake
 option(HX_CLOG_ENABLE_MINIDUMP "Enable Windows minidump support" ON)
 ```
 
-## 13. Sink 输出层
+## 13. Sink output layer
 
-Sink 是日志输出目标。所有日志最终都写入一个或多个 sink。
+A sink is a log output target. Every log line is eventually written to one or more sinks.
 
 ```c
 typedef struct hx_clog_sink hx_clog_sink_t;
@@ -927,20 +930,20 @@ typedef struct hx_clog_sink_vtable {
 } hx_clog_sink_vtable_t;
 ```
 
-### 13.1 内置 sink
+### 13.1 Built-in sinks
 
-| sink | 说明 |
+| sink | Description |
 | --- | --- |
-| Console Sink | 输出到 stdout/stderr，按级别着色 |
-| File Sink | 输出到固定文件 |
-| Rotate File Sink | 自动轮转文件 |
-| Crash Sink | 专门写 crash 信息 |
-| Callback Sink | 用户自定义处理，例如写入 GUI、网络、数据库 |
-| Syslog Sink | Linux/macOS 系统日志，可选 |
-| EventLog Sink | Windows Event Log，可选 |
-| Android Log Sink | Android logcat，可选 |
+| Console Sink | Output to stdout/stderr, colored by level |
+| File Sink | Output to a fixed file |
+| Rotate File Sink | Automatically rotate files |
+| Crash Sink | Dedicated crash information output |
+| Callback Sink | User-defined handling, such as GUI, network, or database output |
+| Syslog Sink | Linux/macOS system log, optional |
+| EventLog Sink | Windows Event Log, optional |
+| Android Log Sink | Android logcat, optional |
 
-### 13.2 自定义 sink
+### 13.2 Custom sink
 
 ```c
 typedef int (*hx_clog_callback_t)(
@@ -953,38 +956,38 @@ typedef int (*hx_clog_callback_t)(
 int hx_clog_add_callback_sink(hx_clog_callback_t cb, void* user_data);
 ```
 
-## 14. 线程安全
+## 14. Thread safety
 
-`hx_clog` 应保证以下接口线程安全：
+`hx_clog` should guarantee the following thread-safety properties:
 
-| 接口 | 线程安全要求 |
+| Interface | Thread-safety requirement |
 | --- | --- |
-| `hx_clog_write` | 必须线程安全 |
-| `hx_clog_flush` | 必须线程安全 |
-| `hx_clog_set_level` | 使用原子变量 |
-| `hx_clog_shutdown` | 只允许调用一次，多次调用应安全返回 |
-| sink 写入 | 同步模式下需要内部加锁 |
+| `hx_clog_write` | Must be thread-safe |
+| `hx_clog_flush` | Must be thread-safe |
+| `hx_clog_set_level` | Use atomic variables |
+| `hx_clog_shutdown` | Only one real shutdown; repeated calls should return safely |
+| sink writes | Internal locking is required in sync mode |
 
-建议：
+Recommendations:
 
-- 日志级别使用原子读写，降低热路径开销。
-- 同步文件写入使用轻量 mutex。
-- 异步模式下业务线程只 push 队列。
-- 退出时设置状态位，避免 shutdown 后继续写入导致崩溃。
+- Use atomic reads/writes for log level to reduce hot-path overhead.
+- Use a lightweight mutex for synchronous file writes.
+- In async mode, business threads only push into the queue.
+- During shutdown, set a state flag to avoid crashes from writes after shutdown.
 
-## 15. 内存管理
+## 15. Memory management
 
-日志库常见问题是内存分配过多和异常路径不稳定。建议：
+Common logging-library problems include excessive allocation and unstable exceptional paths. Recommended strategies:
 
-| 场景 | 策略 |
+| Scenario | Strategy |
 | --- | --- |
-| 短日志 | 使用栈上固定缓冲区，例如 1KB 或 2KB |
-| 长日志 | 超过栈缓冲区时再动态分配 |
-| 异步队列 | 初始化时预分配消息槽 |
-| crash ring buffer | 初始化时固定分配，不在 crash 中分配 |
-| 自定义 allocator | 允许用户接入内存池 |
+| Short logs | Use a fixed stack buffer, such as 1 KB or 2 KB |
+| Long logs | Allocate dynamically only after exceeding the stack buffer |
+| Async queue | Preallocate message slots during initialization |
+| Crash ring buffer | Allocate fixed memory during initialization and never allocate during crash |
+| Custom allocator | Allow users to plug in a memory pool |
 
-可选 allocator API：
+Optional allocator API:
 
 ```c
 typedef void* (*hx_clog_malloc_fn)(unsigned int size, void* user_data);
@@ -999,45 +1002,35 @@ typedef struct hx_clog_allocator {
 int hx_clog_set_allocator(const hx_clog_allocator_t* allocator);
 ```
 
-### 15.1 单条日志大小上限
+### 15.1 Single-line log size limit
 
-单条日志的大小处理对**同步和异步模式完全一致**：
+Single-line log size handling is **exactly the same in sync and async mode**:
 
-| 阶段 | 行为 |
+| Stage | Behavior |
 | --- | --- |
-| 短日志 | 先写入 1KB 栈缓冲区，零堆分配 |
-| 长日志 | 超过栈缓冲区时动态分配，**默认上限 512KB** |
-| 异步队列 | 每个队列槽的缓冲区按需增长并复用，可容纳完整的大行（不再截断到固定槽大小） |
+| Short log | First writes into a 1 KB stack buffer, zero heap allocation |
+| Long log | Dynamically allocates after exceeding the stack buffer, with a **default limit of 512 KB** |
+| Async queue | Each queue slot buffer grows on demand and is reused, so it can hold a complete large line instead of truncating to a fixed slot size |
 
-> 早期实现中异步模式受固定槽大小限制（单条最多约 512 字节），现已改为
-> 按需增长的复用缓冲区，因此**同步和异步都能输出最大 512KB 的单条日志**，
-> 且稳态下对常规大小的日志仍是零额外分配。
+> Earlier implementations limited async mode by a fixed slot size (about 512 bytes per line). This has been changed to a grow-on-demand reusable buffer, so **both sync and async can output a single log line up to 512 KB**, while regular-size logs still require no extra allocation in the steady state.
 
-**取消上限（仅受内存限制）**：开启 CMake 选项 `HX_CLOG_UNLIMITED_LINE` 后，
-单条日志不再有固定上限，可增长到进程能分配的最大内存：
+**Removing the limit (memory-bound only)**: enable the CMake option `HX_CLOG_UNLIMITED_LINE`, and single log lines no longer have a fixed size limit; they can grow up to the maximum memory the process can allocate:
 
 ```bash
 cmake -S . -B build -DHX_CLOG_UNLIMITED_LINE=ON
 ```
 
-也可以用 `-DHX_CLOG_MAX_LINE_BYTES=<字节数>` 自定义一个具体上限（例如
-`-DHX_CLOG_MAX_LINE_BYTES=2097152` 表示 2MB）；该值在开启
-`HX_CLOG_UNLIMITED_LINE` 时被忽略。
+You can also use `-DHX_CLOG_MAX_LINE_BYTES=<bytes>` to customize a specific cap, for example `-DHX_CLOG_MAX_LINE_BYTES=2097152` for 2 MB. This value is ignored when `HX_CLOG_UNLIMITED_LINE` is enabled.
 
-> 注意：crash 报告中"最近 N 条日志"的环形缓冲区仍为每条 512 字节固定大小
-> （崩溃路径需要预分配、不在 crash 中再申请内存），这只影响 crash 报告里的
-> 日志回放长度，不影响正常的控制台/文件输出。
+> Note: the "last N logs" ring buffer in crash reports still uses a fixed 512-byte entry size. The crash path needs preallocated memory and must not allocate during a crash. This only affects replay length in the crash report and does not affect normal console/file output.
 
-## 16. 跨平台 CMake 构建
+## 16. Cross-platform CMake build
 
-### 16.0 源码编码与 MSVC UTF-8 选项
+### 16.0 Source encoding and MSVC UTF-8 option
 
-本项目所有源码、头文件和文档统一使用 **UTF-8 无 BOM** 编码。
+All source files, headers, and documents in this project use **UTF-8 without BOM**.
 
-MSVC 默认按系统代码页（如简体中文环境的 GBK/936）解析源文件，遇到 UTF-8
-中的非 ASCII 字符会报 `C4819` 警告，甚至导致字符串常量乱码。为避免这一问题，
-CMake 中对 MSVC 显式开启 `/utf-8`（同时设置源字符集和执行字符集为 UTF-8），
-使编译行为与编码无关，且不依赖系统区域设置：
+MSVC defaults to parsing source files with the system codepage, such as GBK/936 on Simplified Chinese systems. Non-ASCII characters in UTF-8 source files may trigger warning `C4819` or even corrupt string literals. To avoid this, CMake explicitly enables `/utf-8` for MSVC, setting both source and execution character sets to UTF-8. This makes compilation independent of system locale:
 
 ```cmake
 if(MSVC)
@@ -1045,22 +1038,20 @@ if(MSVC)
 endif()
 ```
 
-该选项放在顶层 `project()` 之后、定义任何 target 之前，因此对库、示例和测试
-全部生效。GCC/Clang 默认即按 UTF-8 处理源文件，无需额外选项。
+This option is placed after the top-level `project()` and before defining any target, so it applies to the library, examples, and tests. GCC/Clang already treat source files as UTF-8 by default and need no extra option.
 
-> 约定：提交代码时请保持文件为 UTF-8 无 BOM；不要让编辑器写入 BOM 或保存为
-> UTF-16/GBK，否则跨平台编译可能出现告警或乱码。
+> Convention: keep committed files as UTF-8 without BOM. Do not let editors write a BOM or save as UTF-16/GBK, otherwise cross-platform builds may produce warnings or mojibake.
 
-### 16.1 CMake 目标
+### 16.1 CMake target
 
-建议导出标准 CMake target：
+Export a standard CMake target:
 
 ```cmake
 find_package(hx_clog CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE hx_clog::hx_clog)
 ```
 
-### 16.2 顶层 CMakeLists.txt 示例
+### 16.2 Top-level CMakeLists.txt example
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
@@ -1155,7 +1146,7 @@ install(EXPORT hx_clogTargets
 )
 ```
 
-### 16.3 常用构建命令
+### 16.3 Common build commands
 
 #### Windows MSVC
 
@@ -1202,7 +1193,7 @@ cmake --build build-android -j
 
 #### iOS
 
-iOS 通常需要外部 toolchain 文件，例如 `ios-cmake`：
+iOS usually requires an external toolchain file, such as `ios-cmake`:
 
 ```bash
 cmake -S . -B build-ios \
@@ -1213,9 +1204,9 @@ cmake -S . -B build-ios \
 cmake --build build-ios -j
 ```
 
-## 17. 导出符号与 ABI
+## 17. Export symbols and ABI
 
-为了支持动态库，建议定义统一导出宏：
+To support shared libraries, define a unified export macro:
 
 ```c
 #if defined(_WIN32)
@@ -1237,14 +1228,14 @@ cmake --build build-ios -j
 #endif
 ```
 
-ABI 稳定建议：
+ABI stability recommendations:
 
-- 对外只暴露 C 函数。
-- 结构体增加 `size` 字段或版本字段，便于未来兼容扩展。
-- 不在 ABI 中暴露 C++ 类型。
-- 不要求调用方和库使用同一个 C++ STL。
+- Expose only C functions publicly.
+- Add a `size` field or version field to structs to support future compatible extension.
+- Do not expose C++ types in the ABI.
+- Do not require callers and the library to use the same C++ STL.
 
-## 18. 错误码设计
+## 18. Error code design
 
 ```c
 typedef enum hx_clog_result {
@@ -1260,17 +1251,17 @@ typedef enum hx_clog_result {
 } hx_clog_result_t;
 ```
 
-建议提供：
+Provide:
 
 ```c
 const char* hx_clog_strerror(int err);
 ```
 
-## 19. 配置文件支持
+## 19. Configuration file support
 
-基础库不一定必须读取配置文件，但可以提供可选扩展。
+The base library does not necessarily need to read configuration files, but an optional extension can be provided.
 
-### 19.1 INI 示例
+### 19.1 INI example
 
 ```ini
 [hx_clog]
@@ -1286,115 +1277,115 @@ max_backup_files=30
 flush_interval_ms=500
 ```
 
-### 19.2 环境变量
+### 19.2 Environment variables
 
-建议支持环境变量覆盖：
+Recommended environment-variable overrides:
 
-| 变量 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `HX_CLOG_LEVEL` | 覆盖日志级别 |
-| `HX_CLOG_DIR` | 覆盖日志目录 |
-| `HX_CLOG_MODE` | `sync` 或 `async` |
-| `HX_CLOG_CONSOLE` | 是否开启控制台 |
+| `HX_CLOG_LEVEL` | Override log level |
+| `HX_CLOG_DIR` | Override log directory |
+| `HX_CLOG_MODE` | `sync` or `async` |
+| `HX_CLOG_CONSOLE` | Whether console output is enabled |
 
-## 20. 性能设计
+## 20. Performance design
 
-### 20.1 热路径优化
+### 20.1 Hot-path optimization
 
-日志热路径需要尽可能短：
+The logging hot path should be as short as possible:
 
 ```mermaid
 flowchart LR
-    A["宏调用"] --> B["原子级别判断"]
-    B --> C{"是否输出?"}
-    C -->|否| D["返回"]
-    C -->|是| E["栈缓冲格式化"]
-    E --> F["写入队列或 sink"]
+    A["Macro call"] --> B["Atomic level check"]
+    B --> C{"Should output?"}
+    C -->|No| D["Return"]
+    C -->|Yes| E["Format into stack buffer"]
+    E --> F["Write to queue or sink"]
 ```
 
-推荐优化：
+Recommended optimizations:
 
-- 级别过滤在格式化之前。
-- 常见日志使用栈缓冲区，避免堆分配。
-- 异步模式批量写入，减少系统调用。
-- 文件写入使用 buffered IO 或平台原生批量写入。
-- 可选禁用源码文件、函数名等字段减少开销。
+- Perform level filtering before formatting.
+- Use a stack buffer for common logs to avoid heap allocation.
+- Batch writes in async mode to reduce system calls.
+- Use buffered I/O or platform-native batched writes for file output.
+- Optionally disable source file, function name, and similar fields to reduce overhead.
 
-### 20.2 Benchmark 指标
+### 20.2 Benchmark metrics
 
-建议测试：
+Recommended measurements:
 
-| 指标 | 说明 |
+| Metric | Description |
 | --- | --- |
-| 单线程同步吞吐 | 每秒写入日志条数 |
-| 多线程同步吞吐 | 多线程锁竞争表现 |
-| 异步入队延迟 | `HX_LOG_INFO` 平均耗时 |
-| 异步总吞吐 | 后台线程实际落盘速度 |
-| 丢日志计数 | 队列满时行为是否符合预期 |
-| crash flush 成功率 | 崩溃时最后日志保留情况 |
+| Single-thread sync throughput | Log lines written per second |
+| Multi-thread sync throughput | Lock contention behavior across threads |
+| Async enqueue latency | Average cost of `HX_LOG_INFO` |
+| Total async throughput | Actual disk write speed of the background thread |
+| Dropped log count | Whether queue-full behavior matches expectations |
+| Crash flush success rate | Whether final logs survive during crashes |
 
-## 21. 安全性与可靠性
+## 21. Safety and reliability
 
-| 问题 | 设计建议 |
+| Issue | Design recommendation |
 | --- | --- |
-| 多线程同时初始化 | 使用一次性初始化保护 |
-| shutdown 后继续写日志 | 返回错误或写到 fallback stderr |
-| 磁盘满 | 输出错误计数，避免死循环 |
-| 文件被外部删除 | 定期检测 inode/句柄，支持 `hx_clog_reopen` |
-| 队列满 | 根据策略阻塞或丢弃，并统计 |
-| fork 后状态异常 | Unix 下提供 `hx_clog_after_fork_child` |
-| crash handler 死锁 | crash 路径避免普通 mutex 和 malloc |
+| Multiple threads initialize simultaneously | Protect with one-time initialization |
+| Writes after shutdown | Return an error or write to fallback stderr |
+| Disk full | Emit error counters and avoid infinite loops |
+| File deleted externally | Periodically detect inode/handle state and support `hx_clog_reopen` |
+| Queue full | Block or drop according to strategy and collect stats |
+| Invalid state after fork | Provide `hx_clog_after_fork_child` on Unix |
+| Crash handler deadlock | Avoid ordinary mutexes and malloc on the crash path |
 
-## 22. 测试计划
+## 22. Test plan
 
-### 22.1 单元测试
+### 22.1 Unit tests
 
-| 测试 | 重点 |
+| Test | Focus |
 | --- | --- |
-| 格式化测试 | 时间、级别、线程、文件、行号格式正确 |
-| 级别过滤测试 | 低级别日志不会被格式化和写入 |
-| 文件写入测试 | 文件创建、追加、flush、关闭 |
-| 轮转测试 | 大小轮转、时间轮转、清理旧文件 |
-| 异步测试 | 队列、后台线程、shutdown drain |
-| 多线程测试 | 并发写入不崩溃、不乱序到不可接受 |
-| crash 测试 | 触发崩溃后生成 crash 文件 |
+| Formatting test | Time, level, thread, file, and line number are formatted correctly |
+| Level filtering test | Low-level logs are not formatted or written |
+| File write test | File creation, append, flush, close |
+| Rotation test | Size rotation, time rotation, old-file cleanup |
+| Async test | Queue, background thread, shutdown drain |
+| Multi-thread test | Concurrent writes do not crash and do not produce unacceptable disorder |
+| Crash test | Trigger crash and generate crash file |
 
-### 22.2 集成测试
+### 22.2 Integration tests
 
 ```mermaid
 flowchart TD
-    A["启动测试程序"] --> B["写入 100 万条日志"]
-    B --> C["触发大小轮转"]
-    C --> D["检查文件数量和大小"]
-    D --> E["调用 shutdown"]
-    E --> F["验证无丢失或丢失计数正确"]
+    A["Start test program"] --> B["Write 1 million log lines"]
+    B --> C["Trigger size rotation"]
+    C --> D["Check file count and size"]
+    D --> E["Call shutdown"]
+    E --> F["Verify no loss or correct loss count"]
 ```
 
-### 22.3 CI 平台建议
+### 22.3 Suggested CI platforms
 
-| 平台 | 编译器 |
+| Platform | Compiler |
 | --- | --- |
-| Windows | MSVC、MinGW |
-| Linux | GCC、Clang |
+| Windows | MSVC, MinGW |
+| Linux | GCC, Clang |
 | macOS | AppleClang |
 | Android | NDK Clang |
 
-## 23. 与常见日志库能力对齐
+## 23. Alignment with common logging libraries
 
-| 能力 | hx_clog 建议 | 说明 |
+| Capability | hx_clog recommendation | Description |
 | --- | --- | --- |
-| 多级别日志 | 必须支持 | 日志库基础能力 |
-| 彩色控制台 | 支持 | 提升开发体验 |
-| 文件日志 | 必须支持 | 生产环境必需 |
-| 轮转日志 | 必须支持 | 对齐成熟日志库 |
-| 异步日志 | 支持 | 高频日志场景核心能力 |
-| 自定义 sink | 支持 | 方便扩展到 GUI、网络、数据库 |
-| crash 日志 | 强烈建议 | 相比普通日志库更有排障价值 |
-| C ABI | 默认支持 | 更适合底层库和跨语言 |
-| C++11 wrapper | 可选支持 | 增强 C++ 项目易用性 |
-| Header-only | 不建议作为默认 | crash、async、文件模块更适合编译库 |
+| Multiple levels | Required | Basic logging-library capability |
+| Colored console | Supported | Improves development experience |
+| File logging | Required | Required in production |
+| Rotating logs | Required | Aligns with mature logging libraries |
+| Async logging | Supported | Core capability for high-frequency logging |
+| Custom sink | Supported | Easy extension to GUI, network, database |
+| Crash logs | Strongly recommended | More valuable for troubleshooting than ordinary logging alone |
+| C ABI | Supported by default | Better for low-level libraries and cross-language use |
+| C++11 wrapper | Optional | Improves ergonomics for C++ projects |
+| Header-only | Not recommended by default | crash, async, and file modules are better as a compiled library |
 
-## 24. 推荐默认配置
+## 24. Recommended default configuration
 
 ```c
 void hx_clog_config_default(hx_clog_config_t* config) {
@@ -1419,45 +1410,45 @@ void hx_clog_config_default(hx_clog_config_t* config) {
 }
 ```
 
-## 25. 开发路线图
+## 25. Development roadmap
 
-### 第一阶段：可用
+### Phase 1: Usable
 
-- C API。
-- 控制台输出。
-- 普通文件输出。
-- 日志级别过滤。
-- 基础格式化。
-- CMake 静态库构建。
+- C API.
+- Console output.
+- Plain file output.
+- Log-level filtering.
+- Basic formatting.
+- CMake static-library build.
 
-### 第二阶段：好用
+### Phase 2: Pleasant to use
 
-- 日志轮转。
-- 异步日志。
-- 彩色控制台。
-- 自定义 pattern。
-- 多平台 CI。
-- 示例和测试。
+- Log rotation.
+- Async logging.
+- Colored console.
+- Custom pattern.
+- Multi-platform CI.
+- Examples and tests.
 
-### 第三阶段：可靠
+### Phase 3: Reliable
 
-- crash handler。
-- 最后 N 条日志 ring buffer。
-- Windows MiniDump。
-- Unix signal crash log。
-- 磁盘满、外部删除、reopen 等异常路径处理。
+- crash handler.
+- last-N log ring buffer.
+- Windows MiniDump.
+- Unix signal crash log.
+- Exceptional-path handling such as disk full, external deletion, and reopen.
 
-### 第四阶段：可扩展
+### Phase 4: Extensible
 
-- 自定义 sink。
-- syslog / EventLog / Android logcat。
-- C++11 RAII wrapper。
-- 配置文件加载。
-- 性能 benchmark。
+- Custom sink.
+- syslog / EventLog / Android logcat.
+- C++11 RAII wrapper.
+- Configuration file loading.
+- Performance benchmark.
 
-## 26. 最小可落地 API 清单
+## 26. Minimal shippable API list
 
-如果先做一个小而完整的版本，建议至少实现：
+For a small but complete first version, implement at least:
 
 ```c
 void hx_clog_config_default(hx_clog_config_t* config);
@@ -1476,7 +1467,7 @@ void hx_clog_write(
 );
 ```
 
-宏：
+Macros:
 
 ```c
 HX_LOG_TRACE(...)
@@ -1487,30 +1478,30 @@ HX_LOG_ERROR(...)
 HX_LOG_FATAL(...)
 ```
 
-这样第一版就可以满足多数项目的实际接入需求，后续再逐步加入异步、轮转、crash 和 C++11 封装。
+This first version can satisfy most real project integration needs. Async, rotation, crash handling, and the C++11 wrapper can be added gradually afterward.
 
-## 27. 推荐实现优先级
+## 27. Recommended implementation priority
 
 ```mermaid
 flowchart LR
-    A["基础 C API"] --> B["同步控制台/文件"]
-    B --> C["日志格式化"]
-    C --> D["日志轮转"]
-    D --> E["异步队列"]
-    E --> F["crash 日志"]
+    A["Basic C API"] --> B["Sync console/file"]
+    B --> C["Log formatting"]
+    C --> D["Log rotation"]
+    D --> E["Async queue"]
+    E --> F["Crash logging"]
     F --> G["C++11 wrapper"]
-    G --> H["更多 sink 和配置文件"]
+    G --> H["More sinks and config file"]
 ```
 
-## 28. 总结
+## 28. Summary
 
-`hx_clog` 的核心思路是：
+The core idea of `hx_clog` is:
 
-- **C API 做底座**：稳定、轻量、跨语言。
-- **同步模式保证简单可靠**：第一版优先落地。
-- **异步模式解决性能问题**：队列、后台线程、批量 flush。
-- **轮转解决生产可维护性**：按大小、日期和保留策略管理文件。
-- **crash 能力解决关键排障问题**：保存最后日志、异常信息和调用栈。
-- **CMake 做跨平台入口**：Windows、Linux、macOS、Android、iOS 都能统一构建。
+- **Use the C API as the foundation**: stable, lightweight, cross-language.
+- **Keep sync mode simple and reliable**: prioritize the first usable version.
+- **Use async mode to solve performance pressure**: queue, background thread, batched flush.
+- **Use rotation for production maintainability**: manage files by size, date, and retention rules.
+- **Use crash support for critical troubleshooting**: preserve recent logs, exception information, and call stacks.
+- **Use CMake as the cross-platform entry point**: Windows, Linux, macOS, Android, and iOS can all build through one system.
 
-按这个架构推进，`hx_clog` 可以从一个简单的 C 日志库逐步成长为一个接近成熟商用/开源日志框架能力的基础组件。
+With this architecture, `hx_clog` can grow from a simple C logging library into a foundation component with capabilities close to mature commercial/open-source logging frameworks.

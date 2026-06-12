@@ -1,5 +1,7 @@
 # hx_clog Implementation Notes
 
+[English](design.md) | [中文](zh-CN/design.md)
+
 This document describes how the source files map to the architecture in the
 top-level `README.md`.
 

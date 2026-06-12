@@ -1,5 +1,7 @@
 # CI/CD
 
+[English](ci.md) | [中文](zh-CN/ci.md)
+
 This project uses GitHub Actions to build and test `hx_clog` on every push and
 pull request targeting `master`.
 

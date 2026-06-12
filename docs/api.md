@@ -1,5 +1,7 @@
 # hx_clog API Reference
 
+[English](api.md) | [中文](zh-CN/api.md)
+
 All functions use the C ABI and are declared in `include/hx_clog.h`.
 The optional C++11 wrapper lives in `include/hx_clog_cpp.hpp`.
 Build and CI notes are in [ci.md](ci.md).
