@@ -30,10 +30,41 @@
 | Workflow | 覆盖范围 |
 | --- | --- |
 | `build-and-test` | Ubuntu / Windows / macOS，Debug / Release，全量构建 examples + tests |
-| `ctest` | format、rotate、large line、features、rotate time、crash、async、C++11 wrapper |
+| `ctest` | format、rotate、large line、features、rotate time、crash、async、C++11 wrapper、UTF-8 路径 |
+| `linux-arm` | ubuntu-24.04-arm（aarch64）真机构建并运行全部测试 |
+| `sanitizers` | ASan+UBSan 与 TSan 两套构建跑全量测试 |
+| `options-matrix` | `ASYNC=OFF` / `CRASH=OFF` / `ZLIB=OFF` / shared 等编译门控组合验证 |
 | `packaging-smoke` | Linux Release 安装包 smoke test，验证导出的 CMake package 和 public headers |
-| `mobile-smoke` | Android arm64-v8a 和 iOS arm64 交叉编译 smoke build |
+| `mobile-smoke` | Android arm64-v8a 和 iOS arm64 交叉编译 smoke build（含 crash handler） |
 | Linux syslog check | CI 中启用 `HX_CLOG_ENABLE_SYSLOG=ON` 编译 syslog sink 路径 |
+
+## 1.1.0 变更摘要
+
+**修复**
+
+- `hx_get_tid` 不再硬编码 x86-64 系统调用号，ARM Linux / Android 上线程 ID 正确（`SYS_gettid`）。
+- Windows 全部文件操作改用 UTF-16 宽字符 API，UTF-8（含中文）日志目录和文件名在任意系统代码页下可用（`test_utf8path` 覆盖）。
+- 崩溃处理器信号安全化：移除 `popen`/`addr2line`，符号化只用 `dladdr`（模块+偏移，离线解析）；Windows filter 不再调用 `hx_clog_flush()`（崩溃线程持锁时会自死锁）；POSIX 增加 `sigaltstack`，栈溢出也能产出报告。
+- 异步引擎关闭竞态修复：同步原语只建不毁，`running/stop` 全部在锁内判定；单条超大行占用的 slot 缓冲在复用时收缩。
+- `hx_clog_init` / `hx_clog_shutdown` / `hx_clog_reconfigure` 之间串行化（并发调用安全）。
+- 热路径不再为复制 pattern 而加锁（线程本地格式缓存，配置变更按代数惰性刷新）。
+- 轮转 cleanup 不再使用 ~140KB 静态缓冲（线程安全 + 不常驻内存）；每日轮转归档名按文件打开日期推断，跨多天空闲不再错标日期。
+- JSON 模式长消息重试容量按转义膨胀（6x）计算，不再截成非法 JSON。
+- 定时 flush 改用单调时钟（系统时间回拨不再卡住异步刷盘）。
+- macOS `HX_CLOG_ENABLE_SYSLOG=ON` 现在真正生效；`ENABLE_COLOR/STACKTRACE/SYMBOLIZE/MINIDUMP` 等 CMake 开关真正接入代码门控并决定默认行为。
+
+**新增**
+
+- per-sink 格式覆盖：`hx_clog_set_sink_pattern` / `hx_clog_set_sink_format_mode`（同步、异步皆可，例如文件走 pattern、回调 sink 走 JSON）。
+- 内部错误回调 `hx_clog_set_error_handler`（sink 创建失败、文件打开/轮转失败、异步丢弃节流上报）。
+- 重复日志折叠 `hx_clog_set_duplicate_suppression`（"last message repeated N times"）。
+- 崩溃报告用户回调 `hx_clog_set_crash_callback`（向报告追加业务上下文，要求 async-signal-safe）。
+- 整点对齐轮转 `cfg.rotate_align`（如 3600 → 整点切割）；`.gz` 备份数量上限 `cfg.max_compressed_files`（0 = 沿用 `max_backup_files`）。
+- Android / iOS 崩溃处理（Android 用 `_Unwind_Backtrace`），移动端 CI 不再关闭 crash。
+- `hx_clog_after_fork_child` 完整化：重建全部内部锁并重启异步 worker。
+- pkg-config 文件（`hx_clog.pc`）；C++ 封装支持 `{{`/`}}` 转义与 C++20 `std::source_location`。
+
+> 注：`hx_clog_config_t` 在尾部新增了 `rotate_align` / `max_compressed_files` 字段，源码兼容（请始终先调用 `hx_clog_config_default()`），但二进制层面需要重新编译使用方。
 
 ## 功能亮点
 

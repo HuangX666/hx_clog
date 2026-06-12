@@ -15,13 +15,29 @@
 #include <cstdarg>
 #include <sstream>
 
+#if defined(__cplusplus) && __cplusplus >= 202002L && defined(__has_include)
+#  if __has_include(<source_location>)
+#    include <source_location>
+#    if defined(__cpp_lib_source_location)
+#      define HX_CLOG_HAS_SOURCE_LOCATION 1
+#    endif
+#  endif
+#endif
+
 namespace hx {
 namespace clog {
 
 namespace detail {
+/* Base case: copy the remaining format text, honouring {{ and }} escapes. */
 inline void append_brace_format(std::ostringstream& os, const char* fmt) {
-    if (fmt) {
-        os << fmt;
+    const char* p = fmt ? fmt : "";
+    while (*p) {
+        if ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}')) {
+            os << p[0];
+            p += 2;
+            continue;
+        }
+        os << *p++;
     }
 }
 
@@ -35,6 +51,11 @@ void append_brace_format(std::ostringstream& os, const char* fmt,
                          const T& value, const Rest&... rest) {
     const char* p = fmt ? fmt : "";
     while (*p) {
+        if ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}')) {
+            os << p[0]; /* "{{" -> literal '{', "}}" -> literal '}' */
+            p += 2;
+            continue;
+        }
         if (p[0] == '{' && p[1] == '}') {
             append_one(os, value);
             append_brace_format(os, p + 2, rest...);
@@ -84,7 +105,9 @@ public:
     Config& maxBackupDays(int v)              { cfg_.max_backup_days = v; return *this; }
     Config& rotateDaily(bool v)               { cfg_.rotate_daily = v ? 1 : 0; return *this; }
     Config& rotateIntervalSeconds(unsigned int v) { cfg_.rotate_interval_seconds = v; return *this; }
+    Config& rotateAlign(bool v)               { cfg_.rotate_align = v ? 1 : 0; return *this; }
     Config& rotateOnStartup(bool v)           { cfg_.rotate_on_startup = v ? 1 : 0; return *this; }
+    Config& maxCompressedFiles(int v)         { cfg_.max_compressed_files = v; return *this; }
     Config& asyncQueueSize(unsigned int v)    { cfg_.async_queue_size = v; return *this; }
     Config& asyncBatchSize(unsigned int v)    { cfg_.async_batch_size = v; return *this; }
     Config& flushIntervalMs(unsigned int v)   { cfg_.flush_interval_ms = v; return *this; }
@@ -194,6 +217,18 @@ public:
         std::string s = detail::brace_format(fmt, args...);
         hx_clog_write(HX_CLOG_LEVEL_FATAL, "cpp", 0, "fatalf", "%s", s.c_str());
     }
+
+#if defined(HX_CLOG_HAS_SOURCE_LOCATION)
+    /*
+     * C++20: log a plain message with an accurate source location captured
+     * automatically at the call site (no macro needed).
+     */
+    void log(hx_clog_level_t level, const std::string& msg,
+             const std::source_location loc = std::source_location::current()) {
+        hx_clog_write(level, loc.file_name(), (int)loc.line(),
+                      loc.function_name(), "%s", msg.c_str());
+    }
+#endif
 
 private:
     bool owns_ = false;

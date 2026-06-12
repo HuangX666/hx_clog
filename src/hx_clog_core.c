@@ -8,9 +8,14 @@
 #include "hx_clog_internal.h"
 
 #include <stdarg.h>
+#include <limits.h>
 
 #if defined(HX_PLATFORM_WINDOWS)
 #  include <sys/stat.h>
+#endif
+
+#if defined(__linux__)
+#  include <sys/syscall.h>
 #endif
 
 #if defined(_MSC_VER)
@@ -36,6 +41,14 @@ void hx_clog__set_allocator(const hx_clog_allocator_t* a) {
 
 void* hx_clog__malloc(size_t size) {
     if (g_alloc.malloc_fn) {
+        /* the public allocator signature takes unsigned int; refuse requests
+         * that would silently truncate (only reachable with
+         * HX_CLOG_UNLIMITED_LINE on 64-bit) */
+#if defined(SIZE_MAX) && (SIZE_MAX > UINT_MAX)
+        if (size > (size_t)UINT_MAX) {
+            return NULL;
+        }
+#endif
         return g_alloc.malloc_fn((unsigned int)size, g_alloc.user_data);
     }
     return malloc(size);
@@ -126,24 +139,57 @@ void hx_mutex_destroy(hx_mutex_t* m) { pthread_mutex_destroy(m); }
 void hx_mutex_lock(hx_mutex_t* m)    { pthread_mutex_lock(m); }
 void hx_mutex_unlock(hx_mutex_t* m)  { pthread_mutex_unlock(m); }
 
-void hx_cond_init(hx_cond_t* c)      { pthread_cond_init(c, NULL); }
+/* Timed waits use the monotonic clock where possible so a wall-clock jump
+ * (NTP step, manual adjustment) cannot stall the async flush timer. */
+void hx_cond_init(hx_cond_t* c) {
+#if !defined(HX_PLATFORM_APPLE) && defined(CLOCK_MONOTONIC)
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(c, &attr);
+    pthread_condattr_destroy(&attr);
+#else
+    pthread_cond_init(c, NULL);
+#endif
+}
 void hx_cond_destroy(hx_cond_t* c)   { pthread_cond_destroy(c); }
 void hx_cond_signal(hx_cond_t* c)    { pthread_cond_signal(c); }
 void hx_cond_broadcast(hx_cond_t* c) { pthread_cond_broadcast(c); }
 
 int hx_cond_wait_ms(hx_cond_t* c, hx_mutex_t* m, unsigned int timeout_ms) {
     struct timespec ts;
-    struct timeval tv;
     int r;
-    gettimeofday(&tv, NULL);
-    ts.tv_sec = tv.tv_sec + timeout_ms / 1000;
-    ts.tv_nsec = (tv.tv_usec + (timeout_ms % 1000) * 1000) * 1000;
+#if defined(HX_PLATFORM_APPLE)
+    /* macOS lacks pthread_condattr_setclock; the relative wait is unaffected
+     * by wall-clock jumps. */
+    ts.tv_sec = timeout_ms / 1000;
+    ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+    r = pthread_cond_timedwait_relative_np(c, m, &ts);
+    return r == 0 ? 1 : 0;
+#elif defined(CLOCK_MONOTONIC)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
     if (ts.tv_nsec >= 1000000000L) {
         ts.tv_sec += 1;
         ts.tv_nsec -= 1000000000L;
     }
     r = pthread_cond_timedwait(c, m, &ts);
     return r == 0 ? 1 : 0;
+#else
+    {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        ts.tv_sec = tv.tv_sec + timeout_ms / 1000;
+        ts.tv_nsec = (tv.tv_usec + (timeout_ms % 1000) * 1000) * 1000;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        r = pthread_cond_timedwait(c, m, &ts);
+        return r == 0 ? 1 : 0;
+    }
+#endif
 }
 void hx_cond_wait(hx_cond_t* c, hx_mutex_t* m) {
     pthread_cond_wait(c, m);
@@ -216,7 +262,9 @@ unsigned long hx_get_tid(void) {
     pthread_threadid_np(NULL, &tid);
     return (unsigned long)tid;
 #elif defined(__linux__)
-    return (unsigned long)syscall(186 /* SYS_gettid on x86-64 */);
+    /* SYS_gettid resolves to the right number for every architecture
+     * (x86-64: 186, aarch64: 178, arm: 224, ...). */
+    return (unsigned long)syscall(SYS_gettid);
 #else
     return (unsigned long)(size_t)pthread_self();
 #endif
@@ -270,6 +318,42 @@ void hx_localtime(time_t t, struct tm* out) {
 #endif
 }
 
+#if defined(HX_PLATFORM_WINDOWS)
+/* All paths handled by the library are UTF-8 by convention. The Windows
+ * narrow (A) APIs interpret narrow strings in the system ANSI codepage, so a
+ * UTF-8 path with non-ASCII characters would be mangled. Convert to UTF-16
+ * and use the wide APIs everywhere. */
+int hx_utf8_to_wide(const char* utf8, wchar_t* out, int out_cap) {
+    int n;
+    if (!utf8 || !out || out_cap <= 0) {
+        return -1;
+    }
+    n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out, out_cap);
+    return n > 0 ? n : -1;
+}
+
+int hx_wide_to_utf8(const wchar_t* wide, char* out, int out_cap) {
+    int n;
+    if (!wide || !out || out_cap <= 0) {
+        return -1;
+    }
+    n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, out_cap, NULL, NULL);
+    return n > 0 ? n : -1;
+}
+
+static int hx_mkdir_one(const char* path) {
+    wchar_t wpath[HX_CLOG_PATH_MAX];
+    if (hx_utf8_to_wide(path, wpath, HX_CLOG_PATH_MAX) < 0) {
+        return -1;
+    }
+    return _wmkdir(wpath);
+}
+#else
+static int hx_mkdir_one(const char* path) {
+    return mkdir(path, 0755);
+}
+#endif
+
 int hx_mkdir_p(const char* path) {
     char tmp[HX_CLOG_PATH_MAX];
     size_t len, i;
@@ -288,29 +372,24 @@ int hx_mkdir_p(const char* path) {
         if (tmp[i] == '/' || tmp[i] == '\\') {
             char saved = tmp[i];
             tmp[i] = '\0';
-#if defined(HX_PLATFORM_WINDOWS)
-            _mkdir(tmp);
-#else
-            mkdir(tmp, 0755);
-#endif
+            hx_mkdir_one(tmp);
             tmp[i] = saved;
         }
     }
-#if defined(HX_PLATFORM_WINDOWS)
-    if (_mkdir(tmp) != 0 && !hx_file_exists(tmp)) {
+    if (hx_mkdir_one(tmp) != 0 && !hx_file_exists(tmp)) {
         return -1;
     }
-#else
-    if (mkdir(tmp, 0755) != 0 && !hx_file_exists(tmp)) {
-        return -1;
-    }
-#endif
     return 0;
 }
 
 int hx_file_exists(const char* path) {
 #if defined(HX_PLATFORM_WINDOWS)
-    DWORD a = GetFileAttributesA(path);
+    wchar_t wpath[HX_CLOG_PATH_MAX];
+    DWORD a;
+    if (hx_utf8_to_wide(path, wpath, HX_CLOG_PATH_MAX) < 0) {
+        return 0;
+    }
+    a = GetFileAttributesW(wpath);
     return (a != INVALID_FILE_ATTRIBUTES);
 #else
     struct stat st;
@@ -320,8 +399,12 @@ int hx_file_exists(const char* path) {
 
 long long hx_file_size(const char* path) {
 #if defined(HX_PLATFORM_WINDOWS)
+    wchar_t wpath[HX_CLOG_PATH_MAX];
     WIN32_FILE_ATTRIBUTE_DATA ad;
-    if (GetFileAttributesExA(path, GetFileExInfoStandard, &ad)) {
+    if (hx_utf8_to_wide(path, wpath, HX_CLOG_PATH_MAX) < 0) {
+        return -1;
+    }
+    if (GetFileAttributesExW(wpath, GetFileExInfoStandard, &ad)) {
         ULARGE_INTEGER u;
         u.LowPart = ad.nFileSizeLow;
         u.HighPart = ad.nFileSizeHigh;
@@ -339,11 +422,17 @@ long long hx_file_size(const char* path) {
 
 int hx_rename(const char* from, const char* to) {
 #if defined(HX_PLATFORM_WINDOWS)
-    /* rename() fails if target exists on Windows; remove first. */
-    if (hx_file_exists(to)) {
-        DeleteFileA(to);
+    wchar_t wfrom[HX_CLOG_PATH_MAX];
+    wchar_t wto[HX_CLOG_PATH_MAX];
+    if (hx_utf8_to_wide(from, wfrom, HX_CLOG_PATH_MAX) < 0 ||
+        hx_utf8_to_wide(to, wto, HX_CLOG_PATH_MAX) < 0) {
+        return -1;
     }
-    return MoveFileA(from, to) ? 0 : -1;
+    /* rename() fails if target exists on Windows; replace atomically. */
+    if (MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING)) {
+        return 0;
+    }
+    return -1;
 #else
     return rename(from, to);
 #endif
@@ -351,9 +440,27 @@ int hx_rename(const char* from, const char* to) {
 
 int hx_remove(const char* path) {
 #if defined(HX_PLATFORM_WINDOWS)
-    return DeleteFileA(path) ? 0 : -1;
+    wchar_t wpath[HX_CLOG_PATH_MAX];
+    if (hx_utf8_to_wide(path, wpath, HX_CLOG_PATH_MAX) < 0) {
+        return -1;
+    }
+    return DeleteFileW(wpath) ? 0 : -1;
 #else
     return remove(path);
+#endif
+}
+
+FILE* hx_fopen(const char* path, const char* mode) {
+#if defined(HX_PLATFORM_WINDOWS)
+    wchar_t wpath[HX_CLOG_PATH_MAX];
+    wchar_t wmode[16];
+    if (hx_utf8_to_wide(path, wpath, HX_CLOG_PATH_MAX) < 0 ||
+        hx_utf8_to_wide(mode, wmode, 16) < 0) {
+        return NULL;
+    }
+    return _wfopen(wpath, wmode);
+#else
+    return fopen(path, mode);
 #endif
 }
 
@@ -436,6 +543,12 @@ void hx_ring_destroy(void) {
     g_ring_count = 0;
     g_ring_head = 0;
     g_ring_inited = 0;
+}
+
+void hx_ring_after_fork_child(void) {
+    if (g_ring_inited) {
+        hx_mutex_init(&g_ring_lock);
+    }
 }
 
 /* =========================================================================
@@ -551,8 +664,12 @@ typedef struct {
     hx_clog_format_mode_t format_mode;
     hx_clog_formatter_t formatter;
     void* formatter_user_data;
+    volatile int format_gen;     /* bumped on any format-settings change so
+                                  * per-thread caches can refresh lazily */
+    volatile int override_count; /* sinks with a per-sink format override */
 
     hx_mutex_t sink_lock;        /* guards sink writes in sync mode + sink list */
+    hx_mutex_t init_lock;        /* serializes init/shutdown/reconfigure */
 
     /* stats */
     hx_mutex_t stats_lock;
@@ -562,6 +679,45 @@ typedef struct {
 } hx_core_state_t;
 
 static hx_core_state_t g_core;
+
+/* Per-thread snapshot of the global format settings, refreshed only when
+ * format_gen changes, so the hot path normally takes no lock for them. */
+typedef struct {
+    int gen;                     /* 0 = never filled */
+    char pattern[512];
+    hx_clog_format_mode_t mode;
+    hx_clog_formatter_t formatter;
+    void* formatter_user_data;
+} tls_format_cache_t;
+
+static HX_THREAD_LOCAL tls_format_cache_t g_tls_fmt;
+
+/* Internal error handler (cold path). */
+static hx_mutex_t g_err_lock;
+static hx_clog_error_handler_t g_err_handler = NULL;
+static void* g_err_user_data = NULL;
+
+/* Crash callback storage (lives here so the setter exists even when crash
+ * support is compiled out). Written rarely; read inside a crash handler. */
+static hx_clog_crash_callback_t g_crash_cb = NULL;
+static void* g_crash_cb_ud = NULL;
+
+/* Duplicate suppression state. */
+typedef struct {
+    int enabled;
+    unsigned int window_ms;
+    hx_mutex_t lock;
+    int have_last;
+    hx_clog_level_t last_level;
+    int last_line;
+    char last_file[256];
+    char last_msg[256];
+    unsigned int last_msg_len;   /* full length (key uses first 255 bytes) */
+    unsigned long long repeats;
+    long long last_ms;           /* timestamp of last duplicate */
+} dup_state_t;
+
+static dup_state_t g_dup;
 
 /* Once-init guard for the whole module. */
 #if defined(HX_PLATFORM_WINDOWS)
@@ -689,6 +845,8 @@ static void apply_env_overrides(hx_clog_config_t* cfg) {
 /* =========================================================================
  * Emit path
  * ========================================================================= */
+static void ensure_once(void);
+
 void hx_core_add_written(unsigned long long n) {
     hx_mutex_lock(&g_core.stats_lock);
     g_core.written_lines += n;
@@ -700,16 +858,70 @@ void hx_core_add_rotated(unsigned long long n) {
     hx_mutex_unlock(&g_core.stats_lock);
 }
 
-/* Write one formatted line to every sink. Used by sync path and async worker.
- * Level is recovered from the leading bytes? No — we pass it explicitly. */
-void hx_core_emit_to_sinks(hx_clog_level_t level, const char* line, unsigned int len) {
+/* Write one formatted line to the matching sinks. Used by sync path and
+ * async worker. target_sink_id == 0 routes to every sink without a per-sink
+ * format override; a non-zero target routes only to that sink (its line was
+ * rendered with the sink's own format). */
+void hx_core_emit_to_sinks(hx_clog_level_t level, const char* line,
+                           unsigned int len, hx_clog_sink_id_t target_sink_id,
+                           int count_stats) {
     int i;
     hx_mutex_lock(&g_core.sink_lock);
     for (i = 0; i < g_core.sink_count; ++i) {
-        hx_sink_write(g_core.sinks[i], level, line, len);
+        hx_clog_sink_t* s = g_core.sinks[i];
+        if (!s) {
+            continue;
+        }
+        if (target_sink_id == 0) {
+            if (s->override_set) {
+                continue;
+            }
+        } else if (s->id != target_sink_id) {
+            continue;
+        }
+        hx_sink_write(s, level, line, len);
     }
     hx_mutex_unlock(&g_core.sink_lock);
-    hx_core_add_written(1);
+    if (count_stats) {
+        hx_core_add_written(1);
+    }
+}
+
+void hx_core_report_error(int err, const char* message) {
+    hx_clog_error_handler_t h;
+    void* ud;
+    hx_mutex_lock(&g_err_lock);
+    h = g_err_handler;
+    ud = g_err_user_data;
+    hx_mutex_unlock(&g_err_lock);
+    if (h) {
+        h(err, message ? message : "", ud);
+    }
+}
+
+int hx_clog_set_error_handler(hx_clog_error_handler_t handler, void* user_data) {
+    ensure_once();
+    hx_mutex_lock(&g_err_lock);
+    g_err_handler = handler;
+    g_err_user_data = user_data;
+    hx_mutex_unlock(&g_err_lock);
+    return HX_CLOG_OK;
+}
+
+hx_clog_crash_callback_t hx_crash_get_callback(void** user_data_out) {
+    if (user_data_out) {
+        *user_data_out = g_crash_cb_ud;
+    }
+    return g_crash_cb;
+}
+
+int hx_clog_set_crash_callback(hx_clog_crash_callback_t cb, void* user_data) {
+    /* set ud first so a concurrent crash never sees the new cb with the old
+     * user_data */
+    g_crash_cb = NULL;
+    g_crash_cb_ud = user_data;
+    g_crash_cb = cb;
+    return HX_CLOG_OK;
 }
 
 void hx_core_flush_sinks(void) {
@@ -728,12 +940,17 @@ static void core_once_init(void) {
     memset(&g_core, 0, sizeof(g_core));
     hx_mutex_init(&g_core.sink_lock);
     hx_mutex_init(&g_core.stats_lock);
+    hx_mutex_init(&g_core.init_lock);
+    hx_mutex_init(&g_err_lock);
+    memset(&g_dup, 0, sizeof(g_dup));
+    hx_mutex_init(&g_dup.lock);
     g_core.level = HX_CLOG_LEVEL_INFO;
     g_core.default_logger.is_default = 1;
     strcpy(g_core.default_logger.name, "hx_clog");
     g_core.default_logger.level = HX_CLOG_LEVEL_INFO;
     g_core.next_sink_id = 1;
     g_core.format_mode = HX_CLOG_FORMAT_PATTERN;
+    g_core.format_gen = 1; /* TLS caches start at 0 => first use refreshes */
 }
 
 #if defined(HX_PLATFORM_WINDOWS)
@@ -777,6 +994,11 @@ static int add_sink_locked(hx_clog_sink_t* s, hx_clog_sink_id_t* out_id) {
         if (g_core.next_sink_id == 0) {
             g_core.next_sink_id = 1;
         }
+        /* fresh sink: no per-sink format override yet */
+        s->override_set = 0;
+        s->override_mode = HX_CLOG_FORMAT_PATTERN;
+        s->override_has_pattern = 0;
+        s->override_pattern[0] = '\0';
     }
     if (s->min_level < HX_CLOG_LEVEL_TRACE || s->min_level > HX_CLOG_LEVEL_OFF) {
         s->min_level = HX_CLOG_LEVEL_TRACE;
@@ -792,20 +1014,34 @@ static int add_sink(hx_clog_sink_t* s) {
     return add_sink_locked(s, NULL);
 }
 
+static void add_system_sink_or_report(hx_clog_sink_t* s, const char* what) {
+    if (!s) {
+        hx_core_report_error(HX_CLOG_ERR_PLATFORM, what);
+        return;
+    }
+    if (add_sink(s) != HX_CLOG_OK) {
+        hx_core_report_error(HX_CLOG_ERR_INVALID_ARGUMENT, what);
+    }
+}
+
 static void add_configured_system_sinks(const hx_clog_config_t* cfg) {
     const char* ident = cfg->system_logger_name ? cfg->system_logger_name :
                         (cfg->logger_name ? cfg->logger_name : "hx_clog");
     if (cfg->enable_syslog) {
-        add_sink(hx_sink_syslog_create(ident));
+        add_system_sink_or_report(hx_sink_syslog_create(ident),
+                                  "syslog sink unavailable on this platform/build");
     }
     if (cfg->enable_event_log) {
-        add_sink(hx_sink_event_log_create(ident));
+        add_system_sink_or_report(hx_sink_event_log_create(ident),
+                                  "event log sink unavailable or registration failed");
     }
     if (cfg->enable_android_log) {
-        add_sink(hx_sink_android_log_create(ident));
+        add_system_sink_or_report(hx_sink_android_log_create(ident),
+                                  "android log sink unavailable on this platform");
     }
     if (cfg->enable_apple_log) {
-        add_sink(hx_sink_apple_log_create(ident));
+        add_system_sink_or_report(hx_sink_apple_log_create(ident),
+                                  "apple os_log sink unavailable on this platform");
     }
 }
 
@@ -828,10 +1064,8 @@ static void close_non_callback_sinks_locked(void) {
     }
 }
 
-int hx_clog_init(const hx_clog_config_t* in_config) {
+static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
     hx_clog_config_t cfg;
-
-    ensure_once();
 
     if (g_core.initialized) {
         return HX_CLOG_ERR_ALREADY_INITIALIZED;
@@ -862,6 +1096,9 @@ int hx_clog_init(const hx_clog_config_t* in_config) {
     g_core.formatter_user_data = cfg.formatter_user_data;
     g_core.mode = cfg.mode;
     g_core.sink_count = 0;
+    hx_atomic_store_level(&g_core.override_count, 0);
+    hx_atomic_store_level(&g_core.format_gen,
+                          hx_atomic_load_level(&g_core.format_gen) + 1);
     hx_atomic_store_level(&g_core.level, (int)cfg.level);
     strncpy(g_core.default_logger.name, cfg.logger_name,
             sizeof(g_core.default_logger.name) - 1);
@@ -872,12 +1109,20 @@ int hx_clog_init(const hx_clog_config_t* in_config) {
 
     /* build sinks */
     if (cfg.enable_console) {
-        add_sink(hx_sink_console_create(1, cfg.enable_color));
+        hx_clog_sink_t* cs = hx_sink_console_create(1, cfg.enable_color);
+        if (!cs) {
+            hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                                 "console sink creation failed");
+        } else {
+            add_sink(cs);
+        }
     }
     if (cfg.enable_file) {
         hx_clog_sink_t* fs = hx_sink_file_create(cfg.log_dir, cfg.file_name, &cfg);
         if (!fs) {
             /* file is important; report failure but keep console working */
+            hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                                 "file sink creation failed (log_dir/file_name)");
             if (g_core.sink_count == 0) {
                 return HX_CLOG_ERR_OPEN_FILE_FAILED;
             }
@@ -913,14 +1158,26 @@ int hx_clog_init(const hx_clog_config_t* in_config) {
     return HX_CLOG_OK;
 }
 
+int hx_clog_init(const hx_clog_config_t* in_config) {
+    int rc;
+    ensure_once();
+    hx_mutex_lock(&g_core.init_lock);
+    rc = hx_clog_init_locked(in_config);
+    hx_mutex_unlock(&g_core.init_lock);
+    return rc;
+}
+
 int hx_clog_is_initialized(void) {
     return g_core.initialized;
 }
+
+static void dup_flush_pending(void); /* defined with the write path below */
 
 void hx_clog_flush(void) {
     if (!g_core.initialized) {
         return;
     }
+    dup_flush_pending(); /* emit a pending "repeated N times" line first */
 #if defined(HX_CLOG_ENABLE_ASYNC)
     if (g_core.mode == HX_CLOG_MODE_ASYNC) {
         hx_async_flush();
@@ -931,9 +1188,13 @@ void hx_clog_flush(void) {
 
 void hx_clog_shutdown(void) {
     int i;
+    ensure_once();
+    hx_mutex_lock(&g_core.init_lock);
     if (!g_core.initialized) {
+        hx_mutex_unlock(&g_core.init_lock);
         return;
     }
+    dup_flush_pending(); /* emit a trailing "repeated N times" if pending */
     g_core.initialized = 0; /* stop accepting new logs first */
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
@@ -953,9 +1214,11 @@ void hx_clog_shutdown(void) {
         g_core.sinks[i] = NULL;
     }
     g_core.sink_count = 0;
+    hx_atomic_store_level(&g_core.override_count, 0);
     hx_mutex_unlock(&g_core.sink_lock);
 
     hx_ring_destroy();
+    hx_mutex_unlock(&g_core.init_lock);
 }
 
 void hx_clog_set_level(hx_clog_level_t level) {
@@ -967,6 +1230,14 @@ hx_clog_level_t hx_clog_get_level(void) {
     return (hx_clog_level_t)hx_atomic_load_level(&g_core.level);
 }
 
+static void bump_format_gen_locked(void) {
+    int g = hx_atomic_load_level(&g_core.format_gen) + 1;
+    if (g == 0) {
+        g = 1; /* 0 is reserved for "TLS cache never filled" */
+    }
+    hx_atomic_store_level(&g_core.format_gen, g);
+}
+
 int hx_clog_set_pattern(const char* pattern) {
     if (!pattern) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
@@ -976,6 +1247,7 @@ int hx_clog_set_pattern(const char* pattern) {
     strncpy(g_core.pattern, pattern, sizeof(g_core.pattern) - 1);
     g_core.pattern[sizeof(g_core.pattern) - 1] = '\0';
     g_core.format_mode = HX_CLOG_FORMAT_PATTERN;
+    bump_format_gen_locked();
     hx_mutex_unlock(&g_core.sink_lock);
     return HX_CLOG_OK;
 }
@@ -987,6 +1259,7 @@ int hx_clog_set_format_mode(hx_clog_format_mode_t mode) {
     ensure_once();
     hx_mutex_lock(&g_core.sink_lock);
     g_core.format_mode = mode;
+    bump_format_gen_locked();
     hx_mutex_unlock(&g_core.sink_lock);
     return HX_CLOG_OK;
 }
@@ -996,16 +1269,26 @@ int hx_clog_set_formatter(hx_clog_formatter_t formatter, void* user_data) {
     hx_mutex_lock(&g_core.sink_lock);
     g_core.formatter = formatter;
     g_core.formatter_user_data = user_data;
+    bump_format_gen_locked();
     hx_mutex_unlock(&g_core.sink_lock);
     return HX_CLOG_OK;
 }
 
-int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
+static void recompute_override_count_locked(void) {
+    int i, n = 0;
+    for (i = 0; i < g_core.sink_count; ++i) {
+        if (g_core.sinks[i] && g_core.sinks[i]->override_set) {
+            n++;
+        }
+    }
+    hx_atomic_store_level(&g_core.override_count, n);
+}
+
+static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
     hx_clog_config_t cfg;
     hx_clog_config_t defaults;
     int rc = HX_CLOG_OK;
 
-    ensure_once();
     if (!g_core.initialized) {
         return HX_CLOG_ERR_NOT_INITIALIZED;
     }
@@ -1043,6 +1326,7 @@ int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
     g_core.format_mode = cfg.format_mode;
     g_core.formatter = cfg.formatter;
     g_core.formatter_user_data = cfg.formatter_user_data;
+    bump_format_gen_locked();
     hx_atomic_store_level(&g_core.level, (int)cfg.level);
     strncpy(g_core.default_logger.name, cfg.logger_name,
             sizeof(g_core.default_logger.name) - 1);
@@ -1050,11 +1334,19 @@ int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
     hx_atomic_store_level(&g_core.default_logger.level, (int)cfg.level);
 
     if (cfg.enable_console) {
-        add_sink(hx_sink_console_create(1, cfg.enable_color));
+        hx_clog_sink_t* cs = hx_sink_console_create(1, cfg.enable_color);
+        if (!cs) {
+            hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                                 "console sink creation failed");
+        } else {
+            add_sink(cs);
+        }
     }
     if (cfg.enable_file) {
         hx_clog_sink_t* fs = hx_sink_file_create(cfg.log_dir, cfg.file_name, &cfg);
         if (!fs) {
+            hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                                 "file sink creation failed (log_dir/file_name)");
             rc = HX_CLOG_ERR_OPEN_FILE_FAILED;
         } else {
             add_sink(fs);
@@ -1062,6 +1354,7 @@ int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
     }
     add_configured_system_sinks(&cfg);
     g_core.mode = cfg.mode;
+    recompute_override_count_locked(); /* surviving callback sinks may have overrides */
     hx_mutex_unlock(&g_core.sink_lock);
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
@@ -1075,6 +1368,15 @@ int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
         g_core.mode = HX_CLOG_MODE_SYNC;
     }
 #endif
+    return rc;
+}
+
+int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
+    int rc;
+    ensure_once();
+    hx_mutex_lock(&g_core.init_lock);
+    rc = hx_clog_reconfigure_locked(in_config);
+    hx_mutex_unlock(&g_core.init_lock);
     return rc;
 }
 
@@ -1179,6 +1481,7 @@ int hx_clog_remove_sink(hx_clog_sink_id_t id) {
             }
             g_core.sinks[g_core.sink_count - 1] = NULL;
             g_core.sink_count--;
+            recompute_override_count_locked();
             hx_mutex_unlock(&g_core.sink_lock);
             return HX_CLOG_OK;
         }
@@ -1203,6 +1506,73 @@ int hx_clog_set_sink_level(hx_clog_sink_id_t id, hx_clog_level_t min_level) {
     }
     hx_mutex_unlock(&g_core.sink_lock);
     return HX_CLOG_ERR_INVALID_ARGUMENT;
+}
+
+int hx_clog_set_sink_pattern(hx_clog_sink_id_t id, const char* pattern) {
+    int i;
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    for (i = 0; i < g_core.sink_count; ++i) {
+        hx_clog_sink_t* s = g_core.sinks[i];
+        if (s && s->id == id) {
+            if (pattern) {
+                strncpy(s->override_pattern, pattern,
+                        sizeof(s->override_pattern) - 1);
+                s->override_pattern[sizeof(s->override_pattern) - 1] = '\0';
+                s->override_has_pattern = 1;
+                s->override_mode = HX_CLOG_FORMAT_PATTERN;
+                s->override_set = 1;
+            } else {
+                /* clear the whole override */
+                s->override_set = 0;
+                s->override_has_pattern = 0;
+                s->override_pattern[0] = '\0';
+            }
+            recompute_override_count_locked();
+            hx_mutex_unlock(&g_core.sink_lock);
+            return HX_CLOG_OK;
+        }
+    }
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_ERR_INVALID_ARGUMENT;
+}
+
+int hx_clog_set_sink_format_mode(hx_clog_sink_id_t id,
+                                 hx_clog_format_mode_t mode) {
+    int i;
+    if (mode != HX_CLOG_FORMAT_PATTERN && mode != HX_CLOG_FORMAT_JSON) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    ensure_once();
+    hx_mutex_lock(&g_core.sink_lock);
+    for (i = 0; i < g_core.sink_count; ++i) {
+        hx_clog_sink_t* s = g_core.sinks[i];
+        if (s && s->id == id) {
+            s->override_mode = mode;
+            s->override_set = 1;
+            recompute_override_count_locked();
+            hx_mutex_unlock(&g_core.sink_lock);
+            return HX_CLOG_OK;
+        }
+    }
+    hx_mutex_unlock(&g_core.sink_lock);
+    return HX_CLOG_ERR_INVALID_ARGUMENT;
+}
+
+int hx_clog_set_duplicate_suppression(int enable, unsigned int window_ms) {
+    ensure_once();
+    if (!enable) {
+        dup_flush_pending();
+    }
+    hx_mutex_lock(&g_dup.lock);
+    g_dup.enabled = enable ? 1 : 0;
+    g_dup.window_ms = window_ms ? window_ms : 1000;
+    if (!enable) {
+        g_dup.have_last = 0;
+        g_dup.repeats = 0;
+    }
+    hx_mutex_unlock(&g_dup.lock);
+    return HX_CLOG_OK;
 }
 
 int hx_clog_flush_sink(hx_clog_sink_id_t id) {
@@ -1239,10 +1609,28 @@ int hx_clog_set_allocator(const hx_clog_allocator_t* allocator) {
     return HX_CLOG_OK;
 }
 
+void hx_ring_after_fork_child(void); /* defined with the ring buffer above */
+
 void hx_clog_after_fork_child(void) {
-    /* Re-init locks that may have been held by other threads at fork time. */
+    int i;
+    /* Re-init every lock that may have been held by a parent thread at fork
+     * time. Threads do not survive fork, so this is safe in the child. */
     hx_mutex_init(&g_core.sink_lock);
     hx_mutex_init(&g_core.stats_lock);
+    hx_mutex_init(&g_core.init_lock);
+    hx_mutex_init(&g_err_lock);
+    hx_mutex_init(&g_dup.lock);
+    hx_ring_after_fork_child();
+    for (i = 0; i < g_core.sink_count; ++i) {
+        if (g_core.sinks[i] && g_core.sinks[i]->is_file) {
+            hx_sink_file_after_fork(g_core.sinks[i]);
+        }
+    }
+#if defined(HX_CLOG_ENABLE_ASYNC)
+    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+        hx_async_after_fork_child(); /* re-init locks + restart the worker */
+    }
+#endif
 }
 
 /* =========================================================================
@@ -1289,6 +1677,275 @@ static unsigned int format_line(const hx_clog_record_t* rec,
     return hx_format_record(pattern, rec, out, out_size);
 }
 
+/* Format a record with stack-first / heap-retry semantics. On return
+ * *line_out/*len_out describe the formatted line; *heap_out (if non-NULL)
+ * must be freed by the caller. */
+static void format_with_retry(const hx_clog_record_t* rec,
+                              const char* pattern,
+                              hx_clog_format_mode_t mode,
+                              hx_clog_formatter_t formatter,
+                              void* formatter_user_data,
+                              char* stackbuf, unsigned int stack_size,
+                              char** heap_out,
+                              const char** line_out,
+                              unsigned int* len_out) {
+    unsigned int len = format_line(rec, stackbuf, stack_size,
+                                   pattern, mode, formatter, formatter_user_data);
+    *heap_out = NULL;
+    *line_out = stackbuf;
+    *len_out = len;
+    if (len + 1 >= stack_size) {
+        /* likely truncated; retry on heap. JSON escaping can expand the
+         * payload up to 6x (\u00xx), so size accordingly. */
+        unsigned int mul = (mode == HX_CLOG_FORMAT_JSON && !formatter) ? 6u : 1u;
+        unsigned long long ctx_len =
+            rec->context ? (unsigned long long)strlen(rec->context) : 0ULL;
+        unsigned long long need = (unsigned long long)rec->message_len * mul +
+                                  ctx_len * mul + 2048ULL;
+        unsigned int cap;
+        char* hp;
+        if (need > 0xFFFFFFFFULL) {
+            need = 0xFFFFFFFFULL;
+        }
+        cap = hx_clamp_line((unsigned int)need);
+        hp = (char*)hx_clog__malloc(cap);
+        if (hp) {
+            len = format_line(rec, hp, cap,
+                              pattern, mode, formatter, formatter_user_data);
+            *heap_out = hp;
+            *line_out = hp;
+            *len_out = len;
+        }
+    }
+}
+
+/* Route one formatted line to its destination (queue in async mode,
+ * direct sink write otherwise). */
+static void core_dispatch_line(hx_clog_level_t level, const char* line,
+                               unsigned int len, hx_clog_sink_id_t target,
+                               int count_stats) {
+#if defined(HX_CLOG_ENABLE_ASYNC)
+    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+        hx_async_enqueue(level, line, len, target, count_stats);
+        return;
+    }
+#endif
+    hx_core_emit_to_sinks(level, line, len, target, count_stats);
+}
+
+/* Snapshot of one sink's format override, taken under the sink lock so the
+ * actual formatting can run without it. */
+typedef struct {
+    hx_clog_sink_id_t id;
+    hx_clog_format_mode_t mode;
+    int has_pattern;
+    char pattern[HX_SINK_PATTERN_MAX];
+} override_snap_t;
+
+/* Format a record (default format + per-sink overrides), feed the crash
+ * ring, and dispatch every variant. */
+static void core_dispatch_record(hx_clog_record_t* rec) {
+    char line_stack[HX_CLOG_STACK_BUF_SIZE + 256];
+    char* line_heap = NULL;
+    const char* outline;
+    unsigned int line_len;
+    override_snap_t ovs[HX_CLOG_MAX_SINKS];
+    int ov_n = 0;
+    int have_default_targets = 1;
+    int counted = 0;
+    int i;
+    int gen;
+
+    /* refresh the per-thread snapshot of the global format settings only
+     * when they changed; the steady-state hot path takes no lock here */
+    gen = hx_atomic_load_level(&g_core.format_gen);
+    if (gen != g_tls_fmt.gen) {
+        hx_mutex_lock(&g_core.sink_lock);
+        strncpy(g_tls_fmt.pattern, g_core.pattern, sizeof(g_tls_fmt.pattern) - 1);
+        g_tls_fmt.pattern[sizeof(g_tls_fmt.pattern) - 1] = '\0';
+        g_tls_fmt.mode = g_core.format_mode;
+        g_tls_fmt.formatter = g_core.formatter;
+        g_tls_fmt.formatter_user_data = g_core.formatter_user_data;
+        g_tls_fmt.gen = hx_atomic_load_level(&g_core.format_gen);
+        hx_mutex_unlock(&g_core.sink_lock);
+    }
+
+    format_with_retry(rec, g_tls_fmt.pattern, g_tls_fmt.mode,
+                      g_tls_fmt.formatter, g_tls_fmt.formatter_user_data,
+                      line_stack, (unsigned int)sizeof(line_stack),
+                      &line_heap, &outline, &line_len);
+
+    /* feed the crash ring buffer (always, cheap) */
+    hx_ring_push(outline, line_len);
+
+    /* collect per-sink format overrides, if any */
+    if (hx_atomic_load_level(&g_core.override_count) > 0) {
+        int defaults = 0;
+        hx_mutex_lock(&g_core.sink_lock);
+        for (i = 0; i < g_core.sink_count; ++i) {
+            hx_clog_sink_t* s = g_core.sinks[i];
+            if (!s) {
+                continue;
+            }
+            if (s->override_set && ov_n < HX_CLOG_MAX_SINKS) {
+                ovs[ov_n].id = s->id;
+                ovs[ov_n].mode = s->override_mode;
+                ovs[ov_n].has_pattern = s->override_has_pattern;
+                if (s->override_has_pattern) {
+                    memcpy(ovs[ov_n].pattern, s->override_pattern,
+                           HX_SINK_PATTERN_MAX);
+                }
+                ov_n++;
+            } else if (!s->override_set) {
+                defaults++;
+            }
+        }
+        hx_mutex_unlock(&g_core.sink_lock);
+        have_default_targets = defaults > 0;
+    }
+
+    if (have_default_targets || ov_n == 0) {
+        core_dispatch_line(rec->level, outline, line_len, 0, 1);
+        counted = 1;
+    }
+    if (line_heap) {
+        hx_clog__free(line_heap);
+        line_heap = NULL;
+    }
+
+    /* render and dispatch each override variant (line_stack is reusable now:
+     * both the sync write and the async enqueue copy synchronously) */
+    for (i = 0; i < ov_n; ++i) {
+        char* oheap = NULL;
+        const char* oline;
+        unsigned int olen;
+        format_with_retry(rec,
+                          ovs[i].has_pattern ? ovs[i].pattern : g_tls_fmt.pattern,
+                          ovs[i].mode, NULL, NULL,
+                          line_stack, (unsigned int)sizeof(line_stack),
+                          &oheap, &oline, &olen);
+        core_dispatch_line(rec->level, oline, olen, ovs[i].id, counted ? 0 : 1);
+        counted = 1;
+        if (oheap) {
+            hx_clog__free(oheap);
+        }
+    }
+
+    /* FATAL is flushed immediately to maximize crash survivability */
+    if (rec->level >= HX_CLOG_LEVEL_FATAL) {
+        hx_clog_flush();
+    }
+}
+
+/* Emit the "last message repeated N times" summary for the duplicate
+ * suppressor. Runs outside g_dup.lock. */
+static void dup_emit_summary(hx_clog_level_t level, const char* logger_name,
+                             unsigned long long repeats) {
+    char msg[64];
+    char context[8];
+    hx_clog_record_t rec;
+    hx_timestamp_t ts;
+    int n;
+
+    if (!g_core.initialized || repeats == 0) {
+        return;
+    }
+    n = snprintf(msg, sizeof(msg), "last message repeated %llu times",
+                 (unsigned long long)repeats);
+    if (n < 0) {
+        return;
+    }
+    memset(&rec, 0, sizeof(rec));
+    rec.level = level;
+    rec.logger_name = logger_name && logger_name[0]
+                          ? logger_name : g_core.default_logger.name;
+    rec.file = "hx_clog";
+    rec.line = 0;
+    rec.func = "dup";
+    rec.pid = hx_get_pid();
+    rec.tid = hx_get_tid();
+    hx_now(&ts);
+    rec.timestamp_sec = (long long)ts.sec;
+    rec.timestamp_msec = ts.msec;
+    rec.message = msg;
+    rec.message_len = (unsigned int)n;
+    context[0] = '\0';
+    rec.context = context;
+    core_dispatch_record(&rec);
+}
+
+static void dup_flush_pending(void) {
+    unsigned long long repeats = 0;
+    hx_clog_level_t level = HX_CLOG_LEVEL_INFO;
+    hx_mutex_lock(&g_dup.lock);
+    if (g_dup.repeats > 0) {
+        repeats = g_dup.repeats;
+        level = g_dup.last_level;
+        g_dup.repeats = 0;
+        g_dup.have_last = 0;
+    }
+    hx_mutex_unlock(&g_dup.lock);
+    if (repeats > 0) {
+        dup_emit_summary(level, NULL, repeats);
+    }
+}
+
+/* Returns 1 when the current message is a suppressed duplicate (caller must
+ * drop it). May emit a pending summary for the previous run of duplicates. */
+static int dup_check_and_update(hx_clog_level_t level, const char* file,
+                                int line, const char* logger_name,
+                                const char* msg, unsigned int msg_len) {
+    int suppressed = 0;
+    unsigned long long summary_repeats = 0;
+    hx_clog_level_t summary_level = HX_CLOG_LEVEL_INFO;
+    unsigned int klen = msg_len < sizeof(g_dup.last_msg) - 1
+                            ? msg_len : (unsigned int)sizeof(g_dup.last_msg) - 1;
+    hx_timestamp_t ts;
+    long long now_ms;
+
+    hx_now(&ts);
+    now_ms = (long long)ts.sec * 1000LL + (long long)ts.msec;
+
+    hx_mutex_lock(&g_dup.lock);
+    if (!g_dup.enabled) {
+        hx_mutex_unlock(&g_dup.lock);
+        return 0;
+    }
+    if (g_dup.have_last &&
+        g_dup.last_level == level &&
+        g_dup.last_line == line &&
+        g_dup.last_msg_len == msg_len &&
+        strncmp(g_dup.last_file, file ? file : "",
+                sizeof(g_dup.last_file) - 1) == 0 &&
+        strncmp(g_dup.last_msg, msg, klen) == 0 &&
+        (now_ms - g_dup.last_ms) <= (long long)g_dup.window_ms) {
+        g_dup.repeats++;
+        g_dup.last_ms = now_ms;
+        suppressed = 1;
+    } else {
+        if (g_dup.repeats > 0) {
+            summary_repeats = g_dup.repeats;
+            summary_level = g_dup.last_level;
+        }
+        g_dup.repeats = 0;
+        g_dup.have_last = 1;
+        g_dup.last_level = level;
+        g_dup.last_line = line;
+        strncpy(g_dup.last_file, file ? file : "", sizeof(g_dup.last_file) - 1);
+        g_dup.last_file[sizeof(g_dup.last_file) - 1] = '\0';
+        memcpy(g_dup.last_msg, msg, klen);
+        g_dup.last_msg[klen] = '\0';
+        g_dup.last_msg_len = msg_len;
+        g_dup.last_ms = now_ms;
+    }
+    hx_mutex_unlock(&g_dup.lock);
+
+    if (summary_repeats > 0) {
+        dup_emit_summary(summary_level, logger_name, summary_repeats);
+    }
+    return suppressed;
+}
+
 static void core_writev(const char* logger_name,
                         volatile int* logger_level,
                         hx_clog_level_t level,
@@ -1297,19 +1954,11 @@ static void core_writev(const char* logger_name,
     char msg_stack[HX_CLOG_STACK_BUF_SIZE];
     char* msg = msg_stack;
     char* msg_heap = NULL;
-    char line_stack[HX_CLOG_STACK_BUF_SIZE + 256];
-    char* outline = line_stack;
-    char* outline_heap = NULL;
-    char pattern[512];
     char context[1024];
     int n;
     unsigned int msg_len;
-    unsigned int line_len;
     hx_clog_record_t rec;
     hx_timestamp_t ts;
-    hx_clog_format_mode_t mode;
-    hx_clog_formatter_t formatter;
-    void* formatter_user_data;
     va_list args_copy;
 
     /* fast level filter before any work */
@@ -1345,7 +1994,15 @@ static void core_writev(const char* logger_name,
     }
     va_end(args_copy);
 
-    /* assemble the full line via the pattern */
+    /* fold consecutive duplicates when suppression is enabled */
+    if (g_dup.enabled &&
+        dup_check_and_update(level, file, line, logger_name, msg, msg_len)) {
+        if (msg_heap) {
+            hx_clog__free(msg_heap);
+        }
+        return;
+    }
+
     memset(&rec, 0, sizeof(rec));
     rec.level = level;
     rec.logger_name = logger_name && logger_name[0] ? logger_name : g_core.default_logger.name;
@@ -1362,50 +2019,11 @@ static void core_writev(const char* logger_name,
     hx_context_snapshot_text(context, sizeof(context));
     rec.context = context;
 
-    hx_mutex_lock(&g_core.sink_lock);
-    strncpy(pattern, g_core.pattern, sizeof(pattern) - 1);
-    pattern[sizeof(pattern) - 1] = '\0';
-    mode = g_core.format_mode;
-    formatter = g_core.formatter;
-    formatter_user_data = g_core.formatter_user_data;
-    hx_mutex_unlock(&g_core.sink_lock);
+    core_dispatch_record(&rec);
 
-    line_len = format_line(&rec, line_stack, sizeof(line_stack),
-                           pattern, mode, formatter, formatter_user_data);
-    if (line_len + 1 >= sizeof(line_stack)) {
-        /* message likely truncated; retry on heap with room for the pattern
-         * prefix/suffix on top of the (already clamped) message. */
-        unsigned int cap = hx_clamp_line(msg_len + (unsigned int)strlen(context) + 2048);
-        outline_heap = (char*)hx_clog__malloc(cap);
-        if (outline_heap) {
-            line_len = format_line(&rec, outline_heap, cap,
-                                   pattern, mode, formatter, formatter_user_data);
-            outline = outline_heap;
-        }
+    if (msg_heap) {
+        hx_clog__free(msg_heap);
     }
-
-    /* feed the crash ring buffer (always, cheap) */
-    hx_ring_push(outline, line_len);
-
-#if defined(HX_CLOG_ENABLE_ASYNC)
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
-        if (hx_async_enqueue(level, outline, line_len) != HX_CLOG_OK) {
-            /* enqueue failed (drop policy); counted inside async */
-        }
-    } else {
-        hx_core_emit_to_sinks(level, outline, line_len);
-    }
-#else
-    hx_core_emit_to_sinks(level, outline, line_len);
-#endif
-
-    /* FATAL is flushed immediately to maximize crash survivability */
-    if (level >= HX_CLOG_LEVEL_FATAL) {
-        hx_clog_flush();
-    }
-
-    if (msg_heap)     hx_clog__free(msg_heap);
-    if (outline_heap) hx_clog__free(outline_heap);
 }
 
 void hx_clog_writev(hx_clog_level_t level,

@@ -73,19 +73,28 @@ typedef void (*dir_cb)(const char* fname, void* user);
 
 static void list_dir(const char* dir, dir_cb cb, void* user) {
 #if defined(HX_PLATFORM_WINDOWS)
+    /* paths are UTF-8 by convention; use the wide API so non-ASCII log
+     * directories work regardless of the ANSI codepage */
     char pattern[HX_CLOG_PATH_MAX];
-    WIN32_FIND_DATAA fd;
+    wchar_t wpattern[HX_CLOG_PATH_MAX];
+    char name_utf8[512];
+    WIN32_FIND_DATAW fd;
     HANDLE h;
     snprintf(pattern, sizeof(pattern), "%s\\*", dir);
-    h = FindFirstFileA(pattern, &fd);
+    if (hx_utf8_to_wide(pattern, wpattern, HX_CLOG_PATH_MAX) < 0) {
+        return;
+    }
+    h = FindFirstFileW(wpattern, &fd);
     if (h == INVALID_HANDLE_VALUE) {
         return;
     }
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            cb(fd.cFileName, user);
+            if (hx_wide_to_utf8(fd.cFileName, name_utf8, sizeof(name_utf8)) > 0) {
+                cb(name_utf8, user);
+            }
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 #else
     DIR* d = opendir(dir);
@@ -194,8 +203,10 @@ static void collect_cb(const char* fname, void* user) {
     {
         long long mt = 0;
 #if defined(HX_PLATFORM_WINDOWS)
+        wchar_t wfull[HX_CLOG_PATH_MAX];
         WIN32_FILE_ATTRIBUTE_DATA ad;
-        if (GetFileAttributesExA(full, GetFileExInfoStandard, &ad)) {
+        if (hx_utf8_to_wide(full, wfull, HX_CLOG_PATH_MAX) > 0 &&
+            GetFileAttributesExW(wfull, GetFileExInfoStandard, &ad)) {
             ULARGE_INTEGER u;
             u.LowPart = ad.ftLastWriteTime.dwLowDateTime;
             u.HighPart = ad.ftLastWriteTime.dwHighDateTime;
@@ -216,18 +227,30 @@ static void collect_cb(const char* fname, void* user) {
 }
 
 #if defined(HX_CLOG_ENABLE_ZLIB)
+static gzFile hx_gzopen_write(const char* path) {
+#if defined(HX_PLATFORM_WINDOWS)
+    wchar_t wpath[HX_CLOG_PATH_MAX];
+    if (hx_utf8_to_wide(path, wpath, HX_CLOG_PATH_MAX) < 0) {
+        return NULL;
+    }
+    return gzopen_w(wpath, "wb");
+#else
+    return gzopen(path, "wb");
+#endif
+}
+
 static int gzip_file(const char* src, const char* dst) {
     FILE* in;
     gzFile out;
     char buf[16 * 1024];
     int ok = 1;
 
-    in = fopen(src, "rb");
+    in = hx_fopen(src, "rb");
     if (!in) {
         return -1;
     }
     hx_remove(dst);
-    out = gzopen(dst, "wb");
+    out = hx_gzopen_write(dst);
     if (!out) {
         fclose(in);
         return -1;
@@ -296,13 +319,29 @@ static void index_cb(const char* fname, void* user) {
     }
 }
 
+#define HX_ROTATE_MAX_BACKUPS 512
+
 void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
-    static char names[512][256];
-    static long long mtimes[512];
-    static int compressed[512];
+    /* heap-allocated working set (~140 KB): a static buffer would not be
+     * thread-safe with more than one file sink, and would stay resident
+     * forever even when rotation never happens */
+    char (*names)[256];
+    long long* mtimes;
+    int* compressed;   /* 0 plain, 1 = .gz on disk, 2 = compressed just now
+                        * (name lacks the .gz suffix) */
     collect_ctx c;
     char stem[256], ext[64];
     int i, j;
+
+    names = (char (*)[256])hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * 256);
+    mtimes = (long long*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(long long));
+    compressed = (int*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(int));
+    if (!names || !mtimes || !compressed) {
+        hx_clog__free(names);
+        hx_clog__free(mtimes);
+        hx_clog__free(compressed);
+        return; /* skip cleanup this round; rotation itself already happened */
+    }
 
     split_name(fs->base_name, stem, sizeof(stem), ext, sizeof(ext));
 
@@ -314,7 +353,7 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     c.names = names;
     c.mtimes = mtimes;
     c.compressed = compressed;
-    c.cap = 512;
+    c.cap = HX_ROTATE_MAX_BACKUPS;
     list_dir(fs->dir, collect_cb, &c);
 
     /* sort by mtime ascending (oldest first), simple insertion sort */
@@ -365,7 +404,8 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
         c.count = n;
     }
 
-    /* 2. keep max_backup_files recent plain backups; compress older extras. */
+    /* 2. keep max_backup_files recent plain backups; compress older extras
+     * (or delete them when zlib support is unavailable). */
     if (fs->max_backup_files > 0) {
         int plain_count = 0;
         int to_compress;
@@ -378,12 +418,51 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
         for (i = 0; i < c.count && to_compress > 0; ++i) {
             if (!compressed[i] && names[i][0]) {
                 if (compress_or_delete_backup(fs->dir, names[i]) == 0) {
-                    names[i][0] = '\0';
+#if defined(HX_CLOG_ENABLE_ZLIB)
+                    compressed[i] = 2; /* now lives on disk as <name>.gz */
+#else
+                    names[i][0] = '\0'; /* deleted */
+#endif
                     to_compress--;
                 }
             }
         }
     }
+
+    /* 3. cap the number of compressed backups so .gz files cannot pile up
+     * forever; delete the oldest beyond the limit. */
+    {
+        int gz_cap = fs->max_compressed_files > 0 ? fs->max_compressed_files
+                                                  : fs->max_backup_files;
+        if (gz_cap > 0) {
+            int gz_count = 0;
+            for (i = 0; i < c.count; ++i) {
+                if (names[i][0] && compressed[i]) {
+                    gz_count++;
+                }
+            }
+            for (i = 0; i < c.count && gz_count > gz_cap; ++i) {
+                if (names[i][0] && compressed[i]) {
+                    char full[HX_CLOG_PATH_MAX];
+                    if (compressed[i] == 2) {
+                        snprintf(full, sizeof(full), "%s/%s.gz",
+                                 fs->dir, names[i]);
+                    } else {
+                        snprintf(full, sizeof(full), "%s/%s",
+                                 fs->dir, names[i]);
+                    }
+                    if (hx_remove(full) == 0) {
+                        names[i][0] = '\0';
+                        gz_count--;
+                    }
+                }
+            }
+        }
+    }
+
+    hx_clog__free(names);
+    hx_clog__free(mtimes);
+    hx_clog__free(compressed);
 }
 
 /* Decide whether rotation is needed and perform it. Caller holds fs->lock. */
@@ -425,10 +504,24 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
     if ((fs->policy == HX_CLOG_ROTATE_BY_TIME ||
          fs->policy == HX_CLOG_ROTATE_BY_SIZE_AND_TIME) &&
         fs->rotate_interval_seconds > 0 &&
-        fs->current_size > 0 &&
-        ts.sec >= fs->opened_sec + (time_t)fs->rotate_interval_seconds) {
-        need_time = 1;
-        need_interval = 1;
+        fs->current_size > 0) {
+        if (fs->rotate_align) {
+            /* wall-clock aligned: rotate when the open time and now fall in
+             * different interval buckets (e.g. 3600 -> on the hour, UTC
+             * aligned) */
+            long long bucket_now = (long long)ts.sec /
+                                   (long long)fs->rotate_interval_seconds;
+            long long bucket_open = (long long)fs->opened_sec /
+                                    (long long)fs->rotate_interval_seconds;
+            if (bucket_now != bucket_open) {
+                need_time = 1;
+                need_interval = 1;
+            }
+        } else if (ts.sec >= fs->opened_sec +
+                             (time_t)fs->rotate_interval_seconds) {
+            need_time = 1;
+            need_interval = 1;
+        }
     }
 
     if (!need_size && !need_time) {
@@ -438,19 +531,16 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
     /* Use the date the *current* file belongs to for the archive tag. */
     {
         struct tm cur;
-        time_t approx;
-        /* derive a date string from the file's recorded day if possible;
-         * fall back to "now" rounded to the file's day. */
+        /* the active file's content started when it was opened, so its
+         * recorded open time gives the correct archive date even when the
+         * process sat idle across several days (a fixed "now - 1 day" would
+         * mislabel such files) */
         cur = tmv;
-        if (!need_time) {
-            /* size rotation within the same day: tag = today */
-        } else if (need_daily && !need_interval) {
-            /* day changed: archive belongs to the previous day */
-            approx = ts.sec - 86400;
-            hx_localtime(approx, &cur);
-        } else if (need_interval) {
+        if (need_time && fs->opened_sec > 0) {
             hx_localtime(fs->opened_sec, &cur);
         }
+        (void)need_daily;
+        (void)need_interval;
         snprintf(date_tag, sizeof(date_tag), "%04d-%02d-%02d",
                  cur.tm_year + 1900, cur.tm_mon + 1, cur.tm_mday);
         memset(&ic, 0, sizeof(ic));
@@ -475,6 +565,8 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
 
     /* reopen fresh active file */
     if (hx_file_open_active(fs) != HX_CLOG_OK) {
+        hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                             "rotation: reopening the active log file failed");
         return HX_CLOG_ERR_OPEN_FILE_FAILED;
     }
     fs->current_size = 0;
@@ -521,6 +613,8 @@ int hx_rotate_force(struct hx_file_sink_impl* fs) {
     hx_rename(fs->active_path, archive_full);
 
     if (hx_file_open_active(fs) != HX_CLOG_OK) {
+        hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                             "rotation: reopening the active log file failed");
         return HX_CLOG_ERR_OPEN_FILE_FAILED;
     }
     fs->current_size = 0;

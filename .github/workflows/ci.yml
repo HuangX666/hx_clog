@@ -40,6 +40,94 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
 
+  linux-arm:
+    name: ubuntu-arm64 / Release
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHX_CLOG_BUILD_EXAMPLES=ON \
+            -DHX_CLOG_BUILD_TESTS=ON \
+            -DHX_CLOG_ENABLE_SYSLOG=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    name: ${{ matrix.sanitizer }} sanitizer
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: address-undefined
+            flags: "-fsanitize=address,undefined -fno-sanitize-recover=all -g"
+          - sanitizer: thread
+            flags: "-fsanitize=thread -g"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DHX_CLOG_BUILD_EXAMPLES=OFF \
+            -DHX_CLOG_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  options-matrix:
+    name: options ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-async
+            args: "-DHX_CLOG_ENABLE_ASYNC=OFF"
+          - name: no-crash
+            args: "-DHX_CLOG_ENABLE_CRASH=OFF"
+          - name: no-async-no-crash-no-zlib
+            args: "-DHX_CLOG_ENABLE_ASYNC=OFF -DHX_CLOG_ENABLE_CRASH=OFF -DHX_CLOG_ENABLE_ZLIB=OFF"
+          - name: shared
+            args: "-DHX_CLOG_BUILD_SHARED=ON"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHX_CLOG_BUILD_EXAMPLES=ON \
+            -DHX_CLOG_BUILD_TESTS=ON \
+            ${{ matrix.args }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   packaging-smoke:
     name: Install package smoke test
     runs-on: ubuntu-latest
@@ -98,8 +186,7 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DHX_CLOG_BUILD_EXAMPLES=OFF \
-            -DHX_CLOG_BUILD_TESTS=OFF \
-            -DHX_CLOG_ENABLE_CRASH=OFF
+            -DHX_CLOG_BUILD_TESTS=OFF
 
       - name: Build Android
         if: matrix.platform == 'Android arm64-v8a'
@@ -112,8 +199,7 @@ jobs:
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DHX_CLOG_BUILD_EXAMPLES=OFF \
-            -DHX_CLOG_BUILD_TESTS=OFF \
-            -DHX_CLOG_ENABLE_CRASH=OFF
+            -DHX_CLOG_BUILD_TESTS=OFF
 
       - name: Build iOS
         if: matrix.platform == 'iOS arm64'

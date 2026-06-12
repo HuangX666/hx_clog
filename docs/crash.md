@@ -58,11 +58,34 @@ last_logs:
 * **Windows** uses `SetUnhandledExceptionFilter`, `StackWalk64` and
   `dbghelp` (`SymFromAddr` / `SymGetLineFromAddr64`) for symbolization, and
   optionally `MiniDumpWriteDump` for a `.dmp`. Symbolization needs PDBs.
-* **POSIX** installs `sigaction` handlers for `SIGSEGV`, `SIGABRT`, `SIGFPE`,
-  `SIGILL`, `SIGBUS`, captures frames with `backtrace()`, and when
-  `symbolize_stacktrace` is enabled uses `dladdr` plus `addr2line` where
-  available for best-effort file/line output. With symbolization disabled it
-  writes `backtrace_symbols_fd()` output directly.
+  The filter deliberately does **not** call `hx_clog_flush()` — the crashing
+  thread may hold the sink lock and would deadlock; the `last_logs` ring
+  buffer section carries the recent lines instead.
+* **POSIX** installs `sigaction` handlers (with `SA_ONSTACK` on a dedicated
+  `sigaltstack`, so stack-overflow `SIGSEGV` still produces a report) for
+  `SIGSEGV`, `SIGABRT`, `SIGFPE`, `SIGILL`, `SIGBUS`. Frames are captured with
+  `backtrace()` on glibc/Apple and `_Unwind_Backtrace` on Android/musl (so the
+  crash handler builds and works on mobile too). Symbolization uses `dladdr`
+  only — module path + offset + symbol name, **no** `popen`/`addr2line`
+  in-process (forking and allocating inside a signal handler deadlocks exactly
+  when the heap is corrupted). Resolve file/line offline:
+
+  ```bash
+  addr2line -f -p -e <module> <module_offset>   # Linux
+  atos -o <module> -l <load_address> <address>   # macOS
+  ```
+
+### Crash callback (1.1.0)
+
+```c
+void my_crash_cb(int fd, void* ud) {
+    /* async-signal-safe only: write(fd, ...) */
+}
+hx_clog_set_crash_callback(my_crash_cb, NULL);
+```
+
+Invoked after the report body is written, with the open report fd, so the app
+can append its own context (session id, build id, ...).
 
 ## Build flags for good stack traces
 

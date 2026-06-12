@@ -32,7 +32,7 @@ int hx_file_open_active(struct hx_file_sink_impl* fs) {
 
     join_path(fs->active_path, sizeof(fs->active_path), fs->dir, fs->base_name);
 
-    fs->fp = fopen(fs->active_path, "ab");
+    fs->fp = hx_fopen(fs->active_path, "ab");
     if (!fs->fp) {
         return HX_CLOG_ERR_OPEN_FILE_FAILED;
     }
@@ -138,7 +138,9 @@ hx_clog_sink_t* hx_sink_file_create(const char* dir, const char* file_name,
     fs->max_backup_days = cfg ? cfg->max_backup_days : 0;
     fs->rotate_daily = cfg ? cfg->rotate_daily : 0;
     fs->rotate_interval_seconds = cfg ? cfg->rotate_interval_seconds : 0;
+    fs->rotate_align = cfg ? cfg->rotate_align : 0;
     fs->rotate_on_startup = cfg ? cfg->rotate_on_startup : 0;
+    fs->max_compressed_files = cfg ? cfg->max_compressed_files : 0;
 
     hx_mutex_init(&fs->lock);
 
@@ -160,6 +162,16 @@ hx_clog_sink_t* hx_sink_file_create(const char* dir, const char* file_name,
     sink->id = 0;
     sink->min_level = HX_CLOG_LEVEL_TRACE;
     return sink;
+}
+
+void hx_sink_file_after_fork(hx_clog_sink_t* s) {
+    struct hx_file_sink_impl* fs;
+    if (!s || !s->is_file || !s->impl) {
+        return;
+    }
+    fs = (struct hx_file_sink_impl*)s->impl;
+    /* the lock may have been held by a parent thread at fork time */
+    hx_mutex_init(&fs->lock);
 }
 
 int hx_sink_file_reopen(hx_clog_sink_t* s) {

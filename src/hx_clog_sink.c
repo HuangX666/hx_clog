@@ -158,6 +158,10 @@ void hx_sink_console_emit(hx_clog_sink_t* sink, hx_clog_level_t level,
 hx_clog_sink_t* hx_sink_console_create(int use_stderr_for_errors, int enable_color) {
     hx_clog_sink_t* sink = (hx_clog_sink_t*)hx_clog__malloc(sizeof(*sink));
     console_impl* c;
+#if !defined(HX_CLOG_ENABLE_COLOR)
+    /* colored output compiled out: runtime config cannot re-enable it */
+    enable_color = 0;
+#endif
     if (!sink) {
         return NULL;
     }
@@ -250,16 +254,15 @@ hx_clog_sink_t* hx_sink_callback_create(hx_clog_callback_t cb, void* user_data) 
  * Platform system sinks
  * ========================================================================= */
 
+/* System sinks are level-routed, so all writes go through system_sink_emit
+ * (which receives the level). Their vtables deliberately have write == NULL:
+ * a level-less write makes no sense for them and an earlier fallback variant
+ * even used the wrong level. */
+
 #if (defined(HX_PLATFORM_POSIX) || defined(HX_PLATFORM_APPLE)) && defined(HX_CLOG_ENABLE_SYSLOG)
 typedef struct {
     char ident[128];
 } syslog_impl;
-
-static int syslog_write(hx_clog_sink_t* sink, const char* data, unsigned int size) {
-    (void)sink;
-    syslog(LOG_USER | LOG_INFO, "%.*s", (int)size, data);
-    return HX_CLOG_OK;
-}
 
 static int syslog_flush(hx_clog_sink_t* sink) {
     (void)sink;
@@ -274,7 +277,7 @@ static void syslog_close(hx_clog_sink_t* sink) {
 }
 
 static const hx_clog_sink_vtable_t k_syslog_vtable = {
-    syslog_write, syslog_flush, syslog_close
+    NULL, syslog_flush, syslog_close
 };
 #endif
 
@@ -320,27 +323,6 @@ static WORD event_type_from_level(hx_clog_level_t level) {
     return EVENTLOG_INFORMATION_TYPE;
 }
 
-static int event_log_write(hx_clog_sink_t* sink, const char* data, unsigned int size) {
-    event_log_impl* ei = (event_log_impl*)sink->impl;
-    char* msg;
-    LPCSTR strings[1];
-    if (!ei || !ei->handle) {
-        return HX_CLOG_ERR_PLATFORM;
-    }
-    msg = (char*)hx_clog__malloc(size + 1);
-    if (!msg) {
-        return HX_CLOG_ERR_OUT_OF_MEMORY;
-    }
-    memcpy(msg, data, size);
-    msg[size] = '\0';
-    strings[0] = msg;
-    ReportEventA(ei->handle,
-                 event_type_from_level(sink->min_level),
-                 0, 0, NULL, 1, 0, strings, NULL);
-    hx_clog__free(msg);
-    return HX_CLOG_OK;
-}
-
 static int event_log_flush(hx_clog_sink_t* sink) {
     (void)sink;
     return HX_CLOG_OK;
@@ -358,7 +340,7 @@ static void event_log_close(hx_clog_sink_t* sink) {
 }
 
 static const hx_clog_sink_vtable_t k_event_log_vtable = {
-    event_log_write, event_log_flush, event_log_close
+    NULL, event_log_flush, event_log_close
 };
 #endif
 
@@ -398,19 +380,6 @@ hx_clog_sink_t* hx_sink_event_log_create(const char* source) {
 }
 
 #if defined(HX_PLATFORM_ANDROID)
-static int android_log_write(hx_clog_sink_t* sink, const char* data, unsigned int size) {
-    char* tag = (char*)sink->impl;
-    char* msg = (char*)hx_clog__malloc(size + 1);
-    if (!msg) {
-        return HX_CLOG_ERR_OUT_OF_MEMORY;
-    }
-    memcpy(msg, data, size);
-    msg[size] = '\0';
-    __android_log_write(ANDROID_LOG_INFO, tag ? tag : "hx_clog", msg);
-    hx_clog__free(msg);
-    return HX_CLOG_OK;
-}
-
 static int android_log_flush(hx_clog_sink_t* sink) {
     (void)sink;
     return HX_CLOG_OK;
@@ -423,7 +392,7 @@ static void android_log_close(hx_clog_sink_t* sink) {
 }
 
 static const hx_clog_sink_vtable_t k_android_log_vtable = {
-    android_log_write, android_log_flush, android_log_close
+    NULL, android_log_flush, android_log_close
 };
 #endif
 
@@ -461,20 +430,6 @@ typedef struct {
     char subsystem[128];
 } apple_log_impl;
 
-static int apple_log_write(hx_clog_sink_t* sink, const char* data, unsigned int size) {
-    apple_log_impl* ai = (apple_log_impl*)sink->impl;
-    char* msg = (char*)hx_clog__malloc(size + 1);
-    if (!msg) {
-        return HX_CLOG_ERR_OUT_OF_MEMORY;
-    }
-    memcpy(msg, data, size);
-    msg[size] = '\0';
-    os_log_with_type(ai->log ? ai->log : OS_LOG_DEFAULT,
-                     OS_LOG_TYPE_INFO, "%{public}s", msg);
-    hx_clog__free(msg);
-    return HX_CLOG_OK;
-}
-
 static int apple_log_flush(hx_clog_sink_t* sink) {
     (void)sink;
     return HX_CLOG_OK;
@@ -487,7 +442,7 @@ static void apple_log_close(hx_clog_sink_t* sink) {
 }
 
 static const hx_clog_sink_vtable_t k_apple_log_vtable = {
-    apple_log_write, apple_log_flush, apple_log_close
+    NULL, apple_log_flush, apple_log_close
 };
 #endif
 

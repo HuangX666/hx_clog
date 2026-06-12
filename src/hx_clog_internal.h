@@ -144,12 +144,23 @@ typedef struct hx_timestamp {
 void hx_now(hx_timestamp_t* ts);
 void hx_localtime(time_t t, struct tm* out);
 
-/* Filesystem. */
+/* Filesystem.
+ *
+ * All paths are UTF-8. On Windows they are converted to UTF-16 internally so
+ * non-ASCII directories work regardless of the system ANSI codepage. */
 int  hx_mkdir_p(const char* path);
 int  hx_file_exists(const char* path);
 long long hx_file_size(const char* path);
 int  hx_rename(const char* from, const char* to);
 int  hx_remove(const char* path);
+FILE* hx_fopen(const char* path, const char* mode);
+
+#if defined(HX_PLATFORM_WINDOWS)
+/* UTF-8 <-> UTF-16 helpers (NUL-terminated). Return wide/byte length
+ * including the terminator, or -1 on failure / overflow. */
+int hx_utf8_to_wide(const char* utf8, wchar_t* out, int out_cap);
+int hx_wide_to_utf8(const wchar_t* wide, char* out, int out_cap);
+#endif
 
 /* -------------------------------------------------------------------------
  * Sink abstraction (declared in public header as opaque)
@@ -172,6 +183,8 @@ typedef enum hx_sink_kind {
     HX_SINK_KIND_APPLE_LOG
 } hx_sink_kind_t;
 
+#define HX_SINK_PATTERN_MAX 256
+
 struct hx_clog_sink {
     const hx_clog_sink_vtable_t* vtable;
     void* impl;            /* sink-specific state */
@@ -180,6 +193,12 @@ struct hx_clog_sink {
     int   is_file;         /* used by reopen/rotate */
     hx_clog_sink_id_t id;
     hx_clog_level_t min_level;
+
+    /* per-sink format override (guarded by the core sink lock) */
+    int   override_set;                       /* 0 = use global format */
+    hx_clog_format_mode_t override_mode;
+    int   override_has_pattern;
+    char  override_pattern[HX_SINK_PATTERN_MAX];
 };
 
 /* console / callback level-aware helpers (sink layer) */
@@ -244,8 +263,12 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs);
 #if defined(HX_CLOG_ENABLE_ASYNC)
 int  hx_async_start(const hx_clog_config_t* cfg);
 void hx_async_stop(void);            /* drains and joins worker */
-int  hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size);
+/* target_sink_id: 0 = every sink without a format override; otherwise only
+ * the sink with that id. count_stats: increment written_lines when emitted. */
+int  hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size,
+                      hx_clog_sink_id_t target_sink_id, int count_stats);
 void hx_async_flush(void);
+void hx_async_after_fork_child(void); /* re-init locks, restart worker */
 unsigned long long hx_async_dropped(void);
 unsigned long long hx_async_high_watermark(void);
 #endif
@@ -253,13 +276,28 @@ unsigned long long hx_async_high_watermark(void);
 /* -------------------------------------------------------------------------
  * Core internal callbacks used by the async worker / sinks.
  * ------------------------------------------------------------------------- */
-/* Write a fully-formatted line to all sinks (synchronous path). */
-void hx_core_emit_to_sinks(hx_clog_level_t level, const char* line, unsigned int len);
+/* Write a fully-formatted line to the matching sinks (synchronous path).
+ * target_sink_id: 0 = every sink without a format override; otherwise only
+ * the sink with that id. count_stats: increment written_lines once. */
+void hx_core_emit_to_sinks(hx_clog_level_t level, const char* line,
+                           unsigned int len, hx_clog_sink_id_t target_sink_id,
+                           int count_stats);
 void hx_core_flush_sinks(void);
 
 /* Stats accessors. */
 void hx_core_add_written(unsigned long long n);
 void hx_core_add_rotated(unsigned long long n);
+
+/* Report an internal failure to the user-installed error handler (no-op when
+ * none is installed). Never call while holding the handler's own lock. */
+void hx_core_report_error(int err, const char* message);
+
+/* Crash callback accessor (storage lives in core so the setter works even
+ * when crash support is compiled out). */
+hx_clog_crash_callback_t hx_crash_get_callback(void** user_data_out);
+
+/* File sink fork helper: re-init the sink's internal lock in the child. */
+void hx_sink_file_after_fork(hx_clog_sink_t* s);
 
 #ifdef __cplusplus
 } /* extern "C" */

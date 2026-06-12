@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(hx_clog
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "A portable C/C++11 logging framework"
     LANGUAGES C CXX
 )
@@ -28,7 +28,7 @@ option(HX_CLOG_ENABLE_CPP11   "Enable C++11 wrapper" ON)
 option(HX_CLOG_ENABLE_ASYNC   "Enable async logging" ON)
 option(HX_CLOG_ENABLE_CRASH   "Enable crash handler" ON)
 option(HX_CLOG_ENABLE_COLOR   "Enable colored console output" ON)
-option(HX_CLOG_ENABLE_SYSLOG  "Enable syslog sink on Unix" OFF)
+option(HX_CLOG_ENABLE_SYSLOG  "Enable syslog sink on Unix/macOS" OFF)
 option(HX_CLOG_ENABLE_MINIDUMP "Enable minidump on Windows" ON)
 option(HX_CLOG_ENABLE_ZLIB "Enable zlib compression for old rotated backups" ON)
 
@@ -116,6 +116,9 @@ elseif(HX_CLOG_MAX_LINE_BYTES)
     target_compile_definitions(hx_clog PUBLIC HX_CLOG_MAX_LINE=${HX_CLOG_MAX_LINE_BYTES})
 endif()
 
+# These definitions gate real code paths: when COLOR is off the console sink
+# ignores enable_color; STACKTRACE/SYMBOLIZE/MINIDUMP compile the matching
+# crash-report sections out and set the crash config defaults accordingly.
 if(HX_CLOG_ENABLE_COLOR)
     target_compile_definitions(hx_clog PRIVATE HX_CLOG_ENABLE_COLOR=1)
 endif()
@@ -140,23 +143,28 @@ endif()
 # ---------------------------------------------------------------------------
 # Platform definitions and libraries
 # ---------------------------------------------------------------------------
+# (platform detection itself lives in src/hx_clog_internal.h via _WIN32 /
+# __APPLE__ / __ANDROID__ / __linux__; no platform macro is injected here)
 if(WIN32)
-    target_compile_definitions(hx_clog PRIVATE HX_CLOG_PLATFORM_WINDOWS=1)
     target_link_libraries(hx_clog PRIVATE dbghelp advapi32)
     if(HX_CLOG_ENABLE_MINIDUMP)
         target_compile_definitions(hx_clog PRIVATE HX_CLOG_ENABLE_MINIDUMP=1)
     endif()
 elseif(ANDROID)
-    target_compile_definitions(hx_clog PRIVATE HX_CLOG_PLATFORM_ANDROID=1 _GNU_SOURCE)
+    target_compile_definitions(hx_clog PRIVATE _GNU_SOURCE)
     find_package(Threads REQUIRED)
     target_link_libraries(hx_clog PUBLIC Threads::Threads)
     target_link_libraries(hx_clog PRIVATE log ${CMAKE_DL_LIBS})
 elseif(APPLE)
-    target_compile_definitions(hx_clog PRIVATE HX_CLOG_PLATFORM_APPLE=1)
     find_package(Threads REQUIRED)
     target_link_libraries(hx_clog PUBLIC Threads::Threads)
+    if(HX_CLOG_ENABLE_SYSLOG)
+        # the sink code accepts syslog on Apple too; previously only the
+        # plain-UNIX branch defined this, so macOS silently lost the sink
+        target_compile_definitions(hx_clog PRIVATE HX_CLOG_ENABLE_SYSLOG=1)
+    endif()
 elseif(UNIX)
-    target_compile_definitions(hx_clog PRIVATE HX_CLOG_PLATFORM_UNIX=1 _GNU_SOURCE)
+    target_compile_definitions(hx_clog PRIVATE _GNU_SOURCE)
     find_package(Threads REQUIRED)
     target_link_libraries(hx_clog PUBLIC Threads::Threads)
     if(HX_CLOG_ENABLE_SYSLOG)
@@ -207,6 +215,22 @@ install(EXPORT hx_clogTargets
     NAMESPACE hx_clog::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/hx_clog
 )
+
+# pkg-config file for non-CMake consumers
+if(NOT WIN32)
+    set(HX_CLOG_PC_LIBS_PRIVATE "-lpthread")
+    if(NOT APPLE)
+        string(APPEND HX_CLOG_PC_LIBS_PRIVATE " -ldl")
+    endif()
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/hx_clog.pc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/hx_clog.pc
+        @ONLY
+    )
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/hx_clog.pc
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+    )
+endif()
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/hx_clogConfig.cmake.in)
     configure_package_config_file(

@@ -43,7 +43,7 @@ extern "C" {
  * Version
  * ------------------------------------------------------------------------- */
 #define HX_CLOG_VERSION_MAJOR 1
-#define HX_CLOG_VERSION_MINOR 0
+#define HX_CLOG_VERSION_MINOR 1
 #define HX_CLOG_VERSION_PATCH 0
 
 /* -------------------------------------------------------------------------
@@ -165,6 +165,13 @@ typedef struct hx_clog_config {
     hx_clog_formatter_t formatter;     /* optional custom formatter */
     void* formatter_user_data;
     const char* system_logger_name;    /* ident/source/tag for system sinks */
+
+    /* -- added in 1.1.0 (zero == old behaviour; always call
+     *    hx_clog_config_default() before filling the struct) -- */
+    int rotate_align;                  /* align interval rotation to wall-clock
+                                        * boundaries (e.g. 3600 -> on the hour) */
+    int max_compressed_files;          /* cap on .gz backups kept after
+                                        * compression; 0 = use max_backup_files */
 } hx_clog_config_t;
 
 HX_CLOG_API void hx_clog_config_default(hx_clog_config_t* config);
@@ -317,9 +324,56 @@ HX_CLOG_API int hx_clog_set_sink_level(hx_clog_sink_id_t id,
 HX_CLOG_API int hx_clog_flush_sink(hx_clog_sink_id_t id);
 HX_CLOG_API int hx_clog_get_sink_count(unsigned int* count);
 
+/* Per-sink format override (added in 1.1.0).
+ *
+ * By default every sink receives the line rendered with the global
+ * pattern/format mode. A sink can be given its own pattern and/or format
+ * mode; the line is then rendered separately for that sink (sync and async).
+ *
+ * - hx_clog_set_sink_pattern(id, "...") gives the sink its own pattern and
+ *   switches it to PATTERN mode. Passing NULL clears the whole override and
+ *   the sink goes back to the global format.
+ * - hx_clog_set_sink_format_mode(id, HX_CLOG_FORMAT_JSON) renders JSON for
+ *   that sink only (a sink pattern set earlier is kept but unused in JSON
+ *   mode).
+ * Note: a global custom formatter does not apply to overridden sinks. */
+HX_CLOG_API int hx_clog_set_sink_pattern(hx_clog_sink_id_t id,
+                                         const char* pattern);
+HX_CLOG_API int hx_clog_set_sink_format_mode(hx_clog_sink_id_t id,
+                                             hx_clog_format_mode_t mode);
+
+/* -------------------------------------------------------------------------
+ * Internal error reporting (added in 1.1.0)
+ *
+ * The library never prints its own errors. Install a handler to be notified
+ * about internal failures: sink creation failures during init/reconfigure,
+ * file open / rotation failures, and async queue drops (throttled). The
+ * handler may be called from any thread, including the async worker; keep it
+ * fast and do not call back into hx_clog from it.
+ * ------------------------------------------------------------------------- */
+typedef void (*hx_clog_error_handler_t)(int err, const char* message,
+                                        void* user_data);
+HX_CLOG_API int hx_clog_set_error_handler(hx_clog_error_handler_t handler,
+                                          void* user_data);
+
+/* -------------------------------------------------------------------------
+ * Duplicate suppression (added in 1.1.0)
+ *
+ * When enabled, consecutive log calls with the same level, source location
+ * and message body are folded: the first occurrence is written, repeats
+ * within window_ms are counted, and a single "last message repeated N times"
+ * line is emitted when a different message arrives (or the window expires).
+ * Disabled by default.
+ * ------------------------------------------------------------------------- */
+HX_CLOG_API int hx_clog_set_duplicate_suppression(int enable,
+                                                  unsigned int window_ms);
+
 /* -------------------------------------------------------------------------
  * Custom allocator (optional)
  * ------------------------------------------------------------------------- */
+/* Note: the size parameter is unsigned int for ABI stability. Requests larger
+ * than UINT_MAX (only possible with HX_CLOG_UNLIMITED_LINE) are refused when a
+ * custom allocator is installed instead of being silently truncated. */
 typedef void* (*hx_clog_malloc_fn)(unsigned int size, void* user_data);
 typedef void  (*hx_clog_free_fn)(void* ptr, void* user_data);
 
@@ -350,8 +404,23 @@ HX_CLOG_API void hx_clog_crash_config_default(hx_clog_crash_config_t* config);
 HX_CLOG_API int  hx_clog_install_crash_handler(const hx_clog_crash_config_t* config);
 HX_CLOG_API void hx_clog_uninstall_crash_handler(void);
 
+/* Optional user hook invoked from inside the crash handler after the report
+ * body has been written (added in 1.1.0). `fd` is the open crash report file
+ * descriptor: append your own context with low-level write() only. The
+ * process is crashing — the callback must be async-signal-safe (no malloc,
+ * no locks, no stdio). */
+typedef void (*hx_clog_crash_callback_t)(int fd, void* user_data);
+HX_CLOG_API int hx_clog_set_crash_callback(hx_clog_crash_callback_t cb,
+                                           void* user_data);
+
 /* -------------------------------------------------------------------------
  * fork support (Unix)
+ *
+ * Call in the child right after fork(). Re-initializes every internal lock
+ * (core, ring buffer, file sinks, async queue) that may have been held by a
+ * thread of the parent, and restarts the async worker thread (which does not
+ * survive fork). Lines queued but not yet written in the parent are dropped
+ * in the child.
  * ------------------------------------------------------------------------- */
 HX_CLOG_API void hx_clog_after_fork_child(void);
 

@@ -1,4 +1,6 @@
-/* hx_clog test: named loggers, context, JSON, formatter, sink ids, reconfigure. */
+/* hx_clog test: named loggers, context, JSON, formatter, sink ids,
+ * reconfigure, per-sink format overrides, duplicate suppression and the
+ * internal error handler. */
 #include "hx_clog.h"
 
 #include <stdio.h>
@@ -7,6 +9,10 @@
 
 static char g_last[4096];
 static int g_count;
+static char g_last2[4096];
+static int g_count2;
+static int g_err_count;
+static int g_err_last;
 static unsigned int g_allocs;
 static unsigned int g_frees;
 
@@ -32,6 +38,24 @@ static int capture_cb(hx_clog_level_t level, const char* data,
     g_last[size] = '\0';
     g_count++;
     return 0;
+}
+
+static int capture_cb2(hx_clog_level_t level, const char* data,
+                       unsigned int size, void* user) {
+    (void)level; (void)user;
+    if (size >= sizeof(g_last2)) {
+        size = sizeof(g_last2) - 1;
+    }
+    memcpy(g_last2, data, size);
+    g_last2[size] = '\0';
+    g_count2++;
+    return 0;
+}
+
+static void error_cb(int err, const char* message, void* user) {
+    (void)message; (void)user;
+    g_err_count++;
+    g_err_last = err;
 }
 
 static unsigned int custom_formatter(const hx_clog_record_t* rec,
@@ -134,6 +158,69 @@ int main(void) {
     HX_LOG_INFO("reconfigured");
     CHECK(g_count == 1);
     CHECK(strstr(g_last, "after:reconfigured") != NULL);
+
+    /* ---- per-sink format override ---- */
+    {
+        hx_clog_sink_id_t json_id = 0;
+        CHECK(hx_clog_add_callback_sink_ex(capture_cb2, NULL, &json_id) == HX_CLOG_OK);
+        CHECK(hx_clog_set_sink_format_mode(json_id, HX_CLOG_FORMAT_JSON) == HX_CLOG_OK);
+        g_count = 0;
+        g_count2 = 0;
+        HX_LOG_INFO("override-test");
+        CHECK(g_count == 1);   /* default-format sink keeps the pattern */
+        CHECK(g_count2 == 1);  /* override sink got JSON */
+        CHECK(strstr(g_last, "after:override-test") != NULL);
+        CHECK(g_last2[0] == '{');
+        CHECK(strstr(g_last2, "\"message\":\"override-test\"") != NULL);
+
+        CHECK(hx_clog_set_sink_pattern(json_id, "OV|%v") == HX_CLOG_OK);
+        g_count2 = 0;
+        HX_LOG_INFO("pat-test");
+        CHECK(g_count2 == 1);
+        CHECK(strncmp(g_last2, "OV|pat-test", 11) == 0);
+
+        CHECK(hx_clog_set_sink_pattern(json_id, NULL) == HX_CLOG_OK); /* clear */
+        g_count2 = 0;
+        HX_LOG_INFO("back-to-global");
+        CHECK(g_count2 == 1);
+        CHECK(strstr(g_last2, "after:back-to-global") != NULL);
+        CHECK(hx_clog_remove_sink(json_id) == HX_CLOG_OK);
+    }
+
+    /* ---- duplicate suppression ---- */
+    {
+        int i;
+        CHECK(hx_clog_set_duplicate_suppression(1, 5000) == HX_CLOG_OK);
+        g_count = 0;
+        for (i = 0; i < 3; ++i) {
+            HX_LOG_INFO("dup-line"); /* same call site: 2 of 3 suppressed */
+        }
+        CHECK(g_count == 1);
+        HX_LOG_INFO("after-dup");    /* flushes "repeated 2 times" + itself */
+        CHECK(g_count == 3);
+        CHECK(strstr(g_last, "after-dup") != NULL);
+        CHECK(hx_clog_set_duplicate_suppression(0, 0) == HX_CLOG_OK);
+        g_count = 0;
+        HX_LOG_INFO("nodup");
+        HX_LOG_INFO("nodup");
+        CHECK(g_count == 2);
+    }
+
+    /* ---- internal error handler ---- */
+    {
+        hx_clog_config_t cfg3;
+        CHECK(hx_clog_set_error_handler(error_cb, NULL) == HX_CLOG_OK);
+        hx_clog_config_default(&cfg3);
+        cfg3.enable_console = 0;
+        cfg3.enable_file = 1;
+        cfg3.log_dir = ""; /* cannot be created -> file sink fails */
+        cfg3.level = HX_CLOG_LEVEL_TRACE;
+        g_err_count = 0;
+        CHECK(hx_clog_reconfigure(&cfg3) == HX_CLOG_ERR_OPEN_FILE_FAILED);
+        CHECK(g_err_count > 0);
+        CHECK(g_err_last == HX_CLOG_ERR_OPEN_FILE_FAILED);
+        CHECK(hx_clog_set_error_handler(NULL, NULL) == HX_CLOG_OK);
+    }
 
     hx_clog_shutdown();
     CHECK(g_allocs > 0);

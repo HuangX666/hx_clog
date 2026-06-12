@@ -39,6 +39,11 @@ sinks.
 
 `hx_clog_init()` rejects `file_name` values containing `/`, `\`, or `:`.
 
+All paths are interpreted as **UTF-8** on every platform. On Windows they are
+converted to UTF-16 internally and the wide file APIs are used, so non-ASCII
+(e.g. Chinese) directories and file names work regardless of the system ANSI
+codepage.
+
 ## Levels
 
 ```c
@@ -156,6 +161,19 @@ int hx_clog_flush_sink(hx_clog_sink_id_t id);
 int hx_clog_get_sink_count(unsigned int* count);
 ```
 
+Per-sink format override (1.1.0):
+
+```c
+/* this sink renders with its own pattern (switches it to PATTERN mode) */
+int hx_clog_set_sink_pattern(hx_clog_sink_id_t id, const char* pattern);
+/* this sink renders JSON (or back to PATTERN) regardless of the global mode */
+int hx_clog_set_sink_format_mode(hx_clog_sink_id_t id, hx_clog_format_mode_t mode);
+```
+
+Passing `NULL` to `hx_clog_set_sink_pattern()` clears the whole override and
+the sink returns to the global format. Overrides work in both sync and async
+mode; a global custom formatter does not apply to overridden sinks.
+
 System sinks:
 
 ```c
@@ -173,16 +191,26 @@ On Unix/Apple targets, syslog support is compiled when
 
 ```c
 cfg.rotate_interval_seconds = 3600; /* interval time rotation, 0=off */
+cfg.rotate_align = 1;               /* 1.1.0: align to wall-clock boundaries */
 cfg.rotate_on_startup = 1;          /* archive an existing active file at init */
+cfg.max_compressed_files = 20;      /* 1.1.0: cap .gz backups; 0=max_backup_files */
 ```
 
 `HX_CLOG_ROTATE_BY_TIME` keeps day rotation when no interval is configured; set
-`rotate_interval_seconds` for hour/minute/second-style splits.
+`rotate_interval_seconds` for hour/minute/second-style splits. With
+`rotate_align = 1` the interval is aligned to wall-clock buckets (epoch based),
+so `3600` rotates **on the hour** instead of "one hour after the file was
+opened".
+
+Archive names carry the date the active file was **opened** — a file written on
+Friday and rotated on Monday is archived under Friday's date.
 
 When zlib is available and `HX_CLOG_ENABLE_ZLIB=ON`, cleanup keeps the newest
 `max_backup_files` plain rotated backups and compresses older plain backups to
-`.gz` instead of deleting them. Compressed backups are still eligible for
-`max_backup_days` age cleanup.
+`.gz` instead of deleting them. The number of `.gz` backups is itself capped by
+`max_compressed_files` (defaulting to `max_backup_files`), so compressed
+backups cannot accumulate forever; the oldest are deleted first. Compressed
+backups are still eligible for `max_backup_days` age cleanup.
 
 ## Custom allocator
 
@@ -198,9 +226,46 @@ Must be called before `hx_clog_init()`.
 void hx_clog_crash_config_default(hx_clog_crash_config_t* config);
 int  hx_clog_install_crash_handler(const hx_clog_crash_config_t* config);
 void hx_clog_uninstall_crash_handler(void);
+
+/* 1.1.0: append app context to the report from inside the handler.
+ * Must be async-signal-safe: write(fd, ...) only. */
+int  hx_clog_set_crash_callback(hx_clog_crash_callback_t cb, void* user_data);
 ```
 
 See [crash.md](crash.md) for details.
+
+## Internal error handler (1.1.0)
+
+```c
+typedef void (*hx_clog_error_handler_t)(int err, const char* message, void* ud);
+int hx_clog_set_error_handler(hx_clog_error_handler_t handler, void* user_data);
+```
+
+The library never prints its own errors. The handler is invoked on sink
+creation failures during init/reconfigure, file open/rotation failures, and
+async queue drops (first drop, then every 10000th). It may run on any thread —
+keep it fast and never call back into hx_clog from it.
+
+## Duplicate suppression (1.1.0)
+
+```c
+int hx_clog_set_duplicate_suppression(int enable, unsigned int window_ms);
+```
+
+When enabled, consecutive calls with the same level, source location and
+message are folded into the first line plus a single
+`last message repeated N times` summary, emitted when a different message
+arrives, on flush/shutdown, or when the window expires. Disabled by default.
+
+## fork support
+
+```c
+void hx_clog_after_fork_child(void);
+```
+
+Call in the child right after `fork()`. Re-initializes every internal lock
+(core, ring buffer, file sinks, async queue) and restarts the async worker
+thread; lines queued but unwritten in the parent are dropped in the child.
 
 ## Errors
 
