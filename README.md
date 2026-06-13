@@ -489,43 +489,114 @@ int main() {
 
 ### 8.1 Default format
 
+The built-in default pattern is:
+
+```text
+%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n
+```
+
+which renders a line like:
+
 ```text
 2026-06-07 15:04:05.123 [INFO ] [tid:12345] main.c:28 main() - server started, port=8080
 ```
 
 Field descriptions:
 
-| Field | Example | Description |
-| --- | --- | --- |
-| Time | `2026-06-07 15:04:05.123` | Local time with millisecond precision |
-| Level | `[INFO ]` | Fixed width for alignment |
-| Thread | `[tid:12345]` | Helps diagnose multi-threaded issues |
-| Source | `main.c:28 main()` | File, line number, function name |
-| Message | `server started` | User log content |
+| Field | Example | Placeholders | Description |
+| --- | --- | --- | --- |
+| Time | `2026-06-07 15:04:05.123` | `%Y-%m-%d %H:%M:%S.%e` | Local time with millisecond precision |
+| Level | `[INFO ]` | `[%l]` | Fixed width (5 chars) for column alignment |
+| Thread | `[tid:12345]` | `[tid:%t]` | Thread ID; helps diagnose multi-threaded issues |
+| Source | `main.c:28 main()` | `%s:%# %!()` | File basename, line number, function name |
+| Message | `server started, port=8080` | `%v` | User log content |
+| Newline | | `%n` | Line terminator (`\n`) |
+
+The default pattern does **not** include the logger/module name (`%c`), the
+process id (`%p`), or the thread-local context (`%x`). Add them to the pattern
+when you need them — see 8.2.
 
 ### 8.2 Pattern syntax
 
-Suggested placeholders:
+A pattern is a plain string; every `%`-placeholder below is substituted per
+record and any other character is copied verbatim. This is the full set the
+engine understands (`src/hx_clog_format.c`):
 
-| Placeholder | Meaning |
-| --- | --- |
-| `%Y-%m-%d %H:%M:%S.%e` | Date and time, milliseconds |
-| `%l` | Log level |
-| `%t` | Thread ID |
-| `%p` | Process ID |
-| `%s` | Source file name (basename only) |
-| `%F` | Full source file path (raw `__FILE__`) |
-| `%#` | Line number |
-| `%!` | Function name |
-| `%v` | Log message |
-| `%n` | Newline |
-| `%%` | Literal percent sign |
+| Placeholder | Meaning | Example output |
+| --- | --- | --- |
+| `%Y` | Year, 4 digits | `2026` |
+| `%m` | Month, 2 digits | `06` |
+| `%d` | Day of month, 2 digits | `07` |
+| `%H` | Hour (24h), 2 digits | `15` |
+| `%M` | Minute, 2 digits | `04` |
+| `%S` | Second, 2 digits | `05` |
+| `%e` | Millisecond, 3 digits | `123` |
+| `%l` | Log level, fixed width 5 | `INFO ` |
+| `%c` | Logger / category (module) name | `network` |
+| `%t` | Thread ID | `12345` |
+| `%p` | Process ID | `2048` |
+| `%s` | Source file name (basename only) | `main.c` |
+| `%F` | Full source file path (raw `__FILE__`) | `src/net/main.c` |
+| `%#` | Line number | `28` |
+| `%!` | Function name | `main` |
+| `%v` | Log message body | `server started` |
+| `%x` | Thread-local context (`key=value` list) | `request=42 user=alice` |
+| `%n` | Newline | `\n` |
+| `%%` | Literal percent sign | `%` |
 
-Example:
+An unknown placeholder (e.g. `%z`) is emitted verbatim as `%z`, and a trailing
+`%` at the very end of the pattern is emitted as a literal `%`.
+
+#### Showing a `[module]` tag
+
+`%c` is the logger/category name — the standard way to print a `[module]`
+prefix (the same concept as Log4j/Python `name`, spdlog `%n`, or an Android
+`TAG`). Attach the name with a named logger and put `%c` in the pattern:
+
+```c
+hx_clog_set_pattern("%Y-%m-%d %H:%M:%S.%e [%l] [%c] %s:%# - %v%n");
+
+HX_LOG_NAMED_INFO("network", "connected to %s", host);
+HX_LOG_NAMED_WARN("db", "slow query: %d ms", ms);
+```
 
 ```text
-[%Y-%m-%d %H:%M:%S.%e] [%l] [pid:%p tid:%t] [%s:%#] %v%n
+2026-06-07 15:04:05.123 [INFO ] [network] conn.c:42 - connected to 10.0.0.1
+2026-06-07 15:04:05.130 [WARN ] [db] query.c:88 - slow query: 250 ms
 ```
+
+Calls made through the unnamed macros (`HX_LOG_INFO`, ...) use the default
+logger name (`logger_name` from the config, default `hx_clog`), so `%c` still
+prints something sensible. A dedicated `hx_clog_logger_t*` created with
+`hx_clog_logger_create("module", ...)` and logged via `HX_LOGGER_INFO(logger,
+...)` behaves the same way.
+
+For a key/value style module tag (e.g. JSON output or several attributes at
+once) use the thread-local context and `%x` instead:
+
+```c
+hx_clog_context_put("module", "network");
+HX_LOG_INFO("connected");          /* %x -> "module=network" */
+```
+
+#### Examples
+
+```text
+/* PID + TID + source location */
+[%Y-%m-%d %H:%M:%S.%e] [%l] [pid:%p tid:%t] [%s:%#] %v%n
+
+/* module-first, compact */
+%H:%M:%S.%e [%l] [%c] %v%n
+
+/* with thread-local context appended */
+%Y-%m-%d %H:%M:%S.%e [%l] [%c] %v {%x}%n
+```
+
+The pattern can be set at init (`cfg.pattern`), changed at runtime
+(`hx_clog_set_pattern`), or overridden for a single sink
+(`hx_clog_set_sink_pattern`); JSON output (`HX_CLOG_FORMAT_JSON`) ignores the
+pattern and emits every field as structured JSON instead, including `logger`
+and `context`.
 
 ## 9. Sync logging design
 
