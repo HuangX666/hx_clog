@@ -44,6 +44,46 @@ cmake --build build-syslog --parallel
 ctest --test-dir build-syslog --output-on-failure
 ```
 
+### 启用 zlib 以支持 `.gz` 轮转压缩
+
+`HX_CLOG_ENABLE_ZLIB` 默认 `ON`，但只有当 CMake 的 `find_package(ZLIB)` 找到
+zlib 时才真正生效。Linux/macOS 上系统包（`zlib1g-dev` / `brew install zlib`）
+会被自动找到；Windows 通常没有系统 zlib，需要手动指向一个。若本机没有，可以从
+源码编译一次：
+
+```sh
+git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git .zlib/src
+cmake -S .zlib/src -B .zlib/build -G "Visual Studio 17 2022" -A x64 \
+      -DCMAKE_INSTALL_PREFIX=.zlib/install
+cmake --build .zlib/build --config Debug   --target install
+cmake --build .zlib/build --config Release --target install
+```
+
+**静态 zlib**（运行时无需 DLL，推荐）：
+
+```sh
+cmake -S . -B build_zlib -G "Visual Studio 17 2022" -A x64 \
+      -DHX_CLOG_ENABLE_ZLIB=ON -DZLIB_USE_STATIC_LIBS=ON \
+      -DCMAKE_PREFIX_PATH=.zlib/install
+cmake --build build_zlib --config Debug --parallel
+ctest --test-dir build_zlib -C Debug --output-on-failure
+```
+
+**动态 zlib**（链接导入库；运行时必须能找到 `zlib*.dll`——放在 PATH 上或可执行
+文件同目录，否则测试会以 `0xc0000135` 失败）：
+
+```sh
+cmake -S . -B build_zlib_dll -G "Visual Studio 17 2022" -A x64 \
+      -DHX_CLOG_ENABLE_ZLIB=ON -DCMAKE_PREFIX_PATH=.zlib/install
+cmake --build build_zlib_dll --config Debug --parallel
+# 先让 DLL 可被找到，再运行测试（PowerShell）：
+#   $env:PATH = ".zlib\install\bin;" + $env:PATH
+ctest --test-dir build_zlib_dll -C Debug --output-on-failure
+```
+
+zlib 生效时，轮转测试会在各测试日志目录下留下 `*.gz` 备份；超过
+`max_backup_files` 的旧备份会被压缩而非删除。
+
 ## 当前测试覆盖
 
 CTest 套件覆盖：

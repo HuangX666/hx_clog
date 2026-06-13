@@ -59,6 +59,49 @@ cmake --build build-syslog --parallel
 ctest --test-dir build-syslog --output-on-failure
 ```
 
+### Enabling zlib for `.gz` rotation
+
+`HX_CLOG_ENABLE_ZLIB` is `ON` by default but only takes effect when CMake's
+`find_package(ZLIB)` locates a zlib. On Linux/macOS the system package
+(`zlib1g-dev` / `brew install zlib`) is found automatically. On Windows there
+is usually no system zlib, so point CMake at one. If you have none, build it
+from source once:
+
+```sh
+git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git .zlib/src
+cmake -S .zlib/src -B .zlib/build -G "Visual Studio 17 2022" -A x64 \
+      -DCMAKE_INSTALL_PREFIX=.zlib/install
+cmake --build .zlib/build --config Debug   --target install
+cmake --build .zlib/build --config Release --target install
+```
+
+**Static zlib** (no runtime DLL needed — recommended):
+
+```sh
+cmake -S . -B build_zlib -G "Visual Studio 17 2022" -A x64 \
+      -DHX_CLOG_ENABLE_ZLIB=ON -DZLIB_USE_STATIC_LIBS=ON \
+      -DCMAKE_PREFIX_PATH=.zlib/install
+cmake --build build_zlib --config Debug --parallel
+ctest --test-dir build_zlib -C Debug --output-on-failure
+```
+
+**Dynamic zlib** (links the import library; the `zlib*.dll` must be findable
+at run time — on PATH or next to the executables, otherwise tests fail with
+`0xc0000135`):
+
+```sh
+cmake -S . -B build_zlib_dll -G "Visual Studio 17 2022" -A x64 \
+      -DHX_CLOG_ENABLE_ZLIB=ON -DCMAKE_PREFIX_PATH=.zlib/install
+cmake --build build_zlib_dll --config Debug --parallel
+# make the DLL visible, then run the tests (PowerShell):
+#   $env:PATH = ".zlib\install\bin;" + $env:PATH
+ctest --test-dir build_zlib_dll -C Debug --output-on-failure
+```
+
+When zlib is active, the rotation tests leave `*.gz` backups under the test
+log directories; rotated backups beyond `max_backup_files` are compressed
+instead of deleted.
+
 ## Current Test Coverage
 
 The CTest suite covers:
