@@ -124,10 +124,28 @@ typedef struct {
 
     char (*names)[256];
     long long* mtimes;
+    long long* keys;     /* age-ordering key parsed from the name (date+index) */
     int* compressed;
     int count;
     int cap;
 } collect_ctx;
+
+/* Derive a monotonic age key from an archive file name of the form
+ * "<stem>.YYYY-MM-DD.<index>[.ext][.gz]". The embedded date + index is the
+ * exact rotation order and, unlike the file mtime (1-second resolution),
+ * stays correct even when many rotations happen within the same second.
+ * Returns a key that sorts oldest-first, or `fallback` (the mtime) when the
+ * name cannot be parsed. */
+static long long archive_order_key(const char* fname, const char* prefix,
+                                   long long fallback) {
+    const char* after = fname + strlen(prefix);
+    int y = 0, mo = 0, d = 0, idx = -1;
+    if (sscanf(after, "%4d-%2d-%2d.%d", &y, &mo, &d, &idx) == 4 && idx >= 0) {
+        long long date_num = (long long)y * 10000 + (long long)mo * 100 + d;
+        return date_num * 100000000LL + (long long)idx;
+    }
+    return fallback;
+}
 
 static int has_prefix(const char* s, const char* prefix) {
     while (*prefix) {
@@ -219,6 +237,9 @@ static void collect_cb(const char* fname, void* user) {
         }
 #endif
         c->mtimes[c->count] = mt;
+        if (c->keys) {
+            c->keys[c->count] = archive_order_key(fname, c->prefix, mt);
+        }
     }
     if (c->compressed) {
         c->compressed[c->count] = is_compressed;
@@ -327,6 +348,7 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
      * forever even when rotation never happens */
     char (*names)[256];
     long long* mtimes;
+    long long* keys;   /* age-ordering key (date+index from the name) */
     int* compressed;   /* 0 plain, 1 = .gz on disk, 2 = compressed just now
                         * (name lacks the .gz suffix) */
     collect_ctx c;
@@ -335,10 +357,12 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
 
     names = (char (*)[256])hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * 256);
     mtimes = (long long*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(long long));
+    keys = (long long*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(long long));
     compressed = (int*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(int));
-    if (!names || !mtimes || !compressed) {
+    if (!names || !mtimes || !keys || !compressed) {
         hx_clog__free(names);
         hx_clog__free(mtimes);
+        hx_clog__free(keys);
         hx_clog__free(compressed);
         return; /* skip cleanup this round; rotation itself already happened */
     }
@@ -352,23 +376,29 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     strncpy(c.active, fs->base_name, sizeof(c.active) - 1);
     c.names = names;
     c.mtimes = mtimes;
+    c.keys = keys;
     c.compressed = compressed;
     c.cap = HX_ROTATE_MAX_BACKUPS;
     list_dir(fs->dir, collect_cb, &c);
 
-    /* sort by mtime ascending (oldest first), simple insertion sort */
+    /* sort ascending (oldest first) by the parsed date+index key, which is
+     * exact per rotation; the file mtime has only 1-second resolution and
+     * ties under rapid rotation, which would keep/compress the wrong files */
     for (i = 1; i < c.count; ++i) {
+        long long key = keys[i];
         long long mt = mtimes[i];
         int comp = compressed[i];
         char tmp[256];
         strncpy(tmp, names[i], sizeof(tmp));
         j = i - 1;
-        while (j >= 0 && mtimes[j] > mt) {
+        while (j >= 0 && keys[j] > key) {
+            keys[j + 1] = keys[j];
             mtimes[j + 1] = mtimes[j];
             compressed[j + 1] = compressed[j];
             strncpy(names[j + 1], names[j], 256);
             --j;
         }
+        keys[j + 1] = key;
         mtimes[j + 1] = mt;
         compressed[j + 1] = comp;
         strncpy(names[j + 1], tmp, 256);
@@ -396,6 +426,7 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
                 if (n != i) {
                     strncpy(names[n], names[i], 256);
                     mtimes[n] = mtimes[i];
+                    keys[n] = keys[i];
                     compressed[n] = compressed[i];
                 }
                 ++n;
@@ -462,6 +493,7 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
 
     hx_clog__free(names);
     hx_clog__free(mtimes);
+    hx_clog__free(keys);
     hx_clog__free(compressed);
 }
 

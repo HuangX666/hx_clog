@@ -82,6 +82,83 @@ static void count_backups(const char* dir, const char* active_name,
 #endif
 }
 
+/* Parse the rotation index out of "<prefix><YYYY-MM-DD>.<index>.log[.gz]".
+ * Returns -1 if the name does not match that shape. */
+static int backup_index(const char* name, const char* prefix) {
+    int y, m, d, idx;
+    if (!has_prefix(name, prefix)) {
+        return -1;
+    }
+    if (sscanf(name + strlen(prefix), "%d-%d-%d.%d", &y, &m, &d, &idx) == 4) {
+        return idx;
+    }
+    return -1;
+}
+
+/* Aggregate index stats over the surviving backups so the test can assert
+ * that cleanup kept the *newest* ones (highest indices), not an arbitrary
+ * subset chosen by a 1-second-resolution mtime tie. */
+typedef struct {
+    int overall_min, overall_max; /* across plain + gz */
+    int min_plain, max_gz;        /* to check plain are all newer than gz */
+    int plain, gz;
+} idx_stats;
+
+static void analyze_backups(const char* dir, const char* active_name,
+                            const char* prefix, idx_stats* s) {
+    s->overall_min = 1 << 30;
+    s->overall_max = -1;
+    s->min_plain = 1 << 30;
+    s->max_gz = -1;
+    s->plain = 0;
+    s->gz = 0;
+#if defined(_WIN32)
+    {
+        char pattern[512];
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        snprintf(pattern, sizeof(pattern), "%s\\*", dir);
+        h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            const char* name = fd.cFileName;
+            int idx, is_gz;
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+            if (strcmp(name, active_name) == 0) continue;
+            is_gz = has_suffix(name, ".log.gz");
+            if (!is_gz && !has_suffix(name, ".log")) continue;
+            idx = backup_index(name, prefix);
+            if (idx < 0) continue;
+            if (idx < s->overall_min) s->overall_min = idx;
+            if (idx > s->overall_max) s->overall_max = idx;
+            if (is_gz) { s->gz++; if (idx > s->max_gz) s->max_gz = idx; }
+            else       { s->plain++; if (idx < s->min_plain) s->min_plain = idx; }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+#else
+    {
+        DIR* dd = opendir(dir);
+        struct dirent* e;
+        if (!dd) return;
+        while ((e = readdir(dd)) != NULL) {
+            const char* name = e->d_name;
+            int idx, is_gz;
+            if (strcmp(name, active_name) == 0) continue;
+            is_gz = has_suffix(name, ".log.gz");
+            if (!is_gz && !has_suffix(name, ".log")) continue;
+            idx = backup_index(name, prefix);
+            if (idx < 0) continue;
+            if (idx < s->overall_min) s->overall_min = idx;
+            if (idx > s->overall_max) s->overall_max = idx;
+            if (is_gz) { s->gz++; if (idx > s->max_gz) s->max_gz = idx; }
+            else       { s->plain++; if (idx < s->min_plain) s->min_plain = idx; }
+        }
+        closedir(dd);
+    }
+#endif
+}
+
 int main(void) {
     hx_clog_config_t cfg;
     hx_clog_stats_t stats;
@@ -135,6 +212,25 @@ int main(void) {
                       &plain_count, &gz_count);
         CHECK(plain_count <= 2);
         CHECK(gz_count >= 1);
+
+        /* cleanup must keep the NEWEST backups (highest rotation indices),
+         * not an arbitrary subset. With many rotations within the same
+         * second, mtime-based ordering would tie and keep the wrong files;
+         * indices are the reliable age key. The survivors must therefore be
+         * a contiguous block at the top, with every plain backup newer than
+         * every compressed one. */
+        {
+            idx_stats s;
+            analyze_backups("./test_rotate_compress_logs", "compress.log",
+                            "compress.", &s);
+            CHECK(s.overall_max >= 0);
+            /* contiguous block of the highest indices */
+            CHECK(s.overall_max - s.overall_min + 1 == s.plain + s.gz);
+            /* the plain (uncompressed) survivors are the very newest */
+            if (s.plain > 0 && s.gz > 0) {
+                CHECK(s.min_plain > s.max_gz);
+            }
+        }
     }
 #endif
 
