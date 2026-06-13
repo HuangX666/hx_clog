@@ -489,43 +489,110 @@ int main() {
 
 ### 8.1 默认格式
 
+内置的默认 pattern 为：
+
+```text
+%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n
+```
+
+渲染出的一行形如：
+
 ```text
 2026-06-07 15:04:05.123 [INFO ] [tid:12345] main.c:28 main() - server started, port=8080
 ```
 
 字段说明：
 
-| 字段 | 示例 | 说明 |
-| --- | --- | --- |
-| 时间 | `2026-06-07 15:04:05.123` | 本地时间，毫秒精度 |
-| 级别 | `[INFO ]` | 固定宽度，便于对齐 |
-| 线程 | `[tid:12345]` | 多线程定位问题 |
-| 源码 | `main.c:28 main()` | 文件、行号、函数名 |
-| 消息 | `server started` | 用户日志内容 |
+| 字段 | 示例 | 占位符 | 说明 |
+| --- | --- | --- | --- |
+| 时间 | `2026-06-07 15:04:05.123` | `%Y-%m-%d %H:%M:%S.%e` | 本地时间，毫秒精度 |
+| 级别 | `[INFO ]` | `[%l]` | 固定宽度（5 字符），便于列对齐 |
+| 线程 | `[tid:12345]` | `[tid:%t]` | 线程 ID，便于多线程定位问题 |
+| 源码 | `main.c:28 main()` | `%s:%# %!()` | 文件名（basename）、行号、函数名 |
+| 消息 | `server started, port=8080` | `%v` | 用户日志内容 |
+| 换行 | | `%n` | 行结束符（`\n`） |
+
+默认 pattern **不包含** logger/模块名（`%c`）、进程 ID（`%p`）和线程本地
+context（`%x`）。需要时把它们加进 pattern 即可，见 8.2。
 
 ### 8.2 pattern 语法
 
-建议支持类似如下占位符：
+pattern 就是一个普通字符串：下表中每个 `%` 占位符会按记录逐条替换，其余字符
+原样输出。以下是格式引擎支持的**全部**占位符（`src/hx_clog_format.c`）：
 
-| 占位符 | 含义 |
-| --- | --- |
-| `%Y-%m-%d %H:%M:%S.%e` | 日期时间，毫秒 |
-| `%l` | 日志级别 |
-| `%t` | 线程 ID |
-| `%p` | 进程 ID |
-| `%s` | 源文件名（仅文件名，basename） |
-| `%F` | 源文件完整路径（`__FILE__` 原样） |
-| `%#` | 行号 |
-| `%!` | 函数名 |
-| `%v` | 日志正文 |
-| `%n` | 换行 |
-| `%%` | 字面量百分号 |
+| 占位符 | 含义 | 输出示例 |
+| --- | --- | --- |
+| `%Y` | 年，4 位 | `2026` |
+| `%m` | 月，2 位 | `06` |
+| `%d` | 日，2 位 | `07` |
+| `%H` | 时（24 小时制），2 位 | `15` |
+| `%M` | 分，2 位 | `04` |
+| `%S` | 秒，2 位 | `05` |
+| `%e` | 毫秒，3 位 | `123` |
+| `%l` | 日志级别，固定宽度 5 | `INFO ` |
+| `%c` | logger / 类别（模块）名 | `network` |
+| `%t` | 线程 ID | `12345` |
+| `%p` | 进程 ID | `2048` |
+| `%s` | 源文件名（仅文件名，basename） | `main.c` |
+| `%F` | 源文件完整路径（`__FILE__` 原样） | `src/net/main.c` |
+| `%#` | 行号 | `28` |
+| `%!` | 函数名 | `main` |
+| `%v` | 日志正文 | `server started` |
+| `%x` | 线程本地 context（`key=value` 列表） | `request=42 user=alice` |
+| `%n` | 换行 | `\n` |
+| `%%` | 字面量百分号 | `%` |
 
-示例：
+未知占位符（如 `%z`）会原样输出为 `%z`；pattern 末尾孤立的 `%` 会作为字面量
+`%` 输出。
+
+#### 显示 `[模块]` 标签
+
+`%c` 就是 logger/类别名——打印 `[模块]` 前缀的标准方式（等同于 Log4j / Python
+的 `name`、spdlog 的 `%n`、Android 的 `TAG`）。用命名 logger 挂上名字，并在
+pattern 里加上 `%c`：
+
+```c
+hx_clog_set_pattern("%Y-%m-%d %H:%M:%S.%e [%l] [%c] %s:%# - %v%n");
+
+HX_LOG_NAMED_INFO("network", "connected to %s", host);
+HX_LOG_NAMED_WARN("db", "slow query: %d ms", ms);
+```
 
 ```text
-[%Y-%m-%d %H:%M:%S.%e] [%l] [pid:%p tid:%t] [%s:%#] %v%n
+2026-06-07 15:04:05.123 [INFO ] [network] conn.c:42 - connected to 10.0.0.1
+2026-06-07 15:04:05.130 [WARN ] [db] query.c:88 - slow query: 250 ms
 ```
+
+用不带名字的宏（`HX_LOG_INFO` 等）打印时，`%c` 取默认 logger 名（config 里的
+`logger_name`，默认 `hx_clog`），所以仍会输出有意义的内容。用
+`hx_clog_logger_create("module", ...)` 创建专用 `hx_clog_logger_t*` 并通过
+`HX_LOGGER_INFO(logger, ...)` 打印，行为一致。
+
+如果想要 key/value 风格的模块标签（例如 JSON 输出，或一次带多个属性），改用
+线程本地 context 配合 `%x`：
+
+```c
+hx_clog_context_put("module", "network");
+HX_LOG_INFO("connected");          /* %x -> "module=network" */
+```
+
+#### 示例
+
+```text
+/* 进程号 + 线程号 + 源码位置 */
+[%Y-%m-%d %H:%M:%S.%e] [%l] [pid:%p tid:%t] [%s:%#] %v%n
+
+/* 模块前置、紧凑 */
+%H:%M:%S.%e [%l] [%c] %v%n
+
+/* 末尾附加线程本地 context */
+%Y-%m-%d %H:%M:%S.%e [%l] [%c] %v {%x}%n
+```
+
+pattern 可以在初始化时设置（`cfg.pattern`）、运行时修改
+（`hx_clog_set_pattern`），或针对单个 sink 覆盖
+（`hx_clog_set_sink_pattern`）；JSON 输出（`HX_CLOG_FORMAT_JSON`）会忽略
+pattern，直接把每个字段结构化为 JSON，其中也包含 `logger` 和 `context`。
 
 ## 9. 同步日志设计
 
