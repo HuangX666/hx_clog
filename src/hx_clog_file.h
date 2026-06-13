@@ -15,7 +15,10 @@ extern "C" {
 
 struct hx_file_sink_impl {
     FILE* fp;
-    char  dir[HX_CLOG_PATH_MAX];
+    char  dir[HX_CLOG_PATH_MAX];   /* base log dir (e.g. "./logs") */
+    char  active_dir[HX_CLOG_PATH_MAX]; /* dir the active file lives in: == dir,
+                                         * or <dir>/<YYYY-MM-DD> when date_subdir
+                                         * is on. Rotation/cleanup operate here. */
     char  base_name[256];          /* e.g. "app.log" */
     char  active_path[HX_CLOG_PATH_MAX];
 
@@ -30,6 +33,7 @@ struct hx_file_sink_impl {
     int rotate_align;              /* align interval rotation to wall clock */
     int rotate_on_startup;
     int max_compressed_files;      /* cap on .gz backups; 0 = max_backup_files */
+    int date_subdir;               /* write under <dir>/<YYYY-MM-DD>/ */
 
     int  cur_year;                 /* date of the currently open file */
     int  cur_yday;

@@ -372,14 +372,14 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     memset(&c, 0, sizeof(c));
     snprintf(c.prefix, sizeof(c.prefix), "%s.", stem);
     strncpy(c.ext, ext, sizeof(c.ext) - 1);
-    strncpy(c.dir, fs->dir, sizeof(c.dir) - 1);
+    strncpy(c.dir, fs->active_dir, sizeof(c.dir) - 1);
     strncpy(c.active, fs->base_name, sizeof(c.active) - 1);
     c.names = names;
     c.mtimes = mtimes;
     c.keys = keys;
     c.compressed = compressed;
     c.cap = HX_ROTATE_MAX_BACKUPS;
-    list_dir(fs->dir, collect_cb, &c);
+    list_dir(fs->active_dir, collect_cb, &c);
 
     /* sort ascending (oldest first) by the parsed date+index key, which is
      * exact per rotation; the file mtime has only 1-second resolution and
@@ -411,7 +411,7 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
         for (i = 0; i < c.count; ++i) {
             if (mtimes[i] > 0 && mtimes[i] < cutoff) {
                 char full[HX_CLOG_PATH_MAX];
-                snprintf(full, sizeof(full), "%s/%s", fs->dir, names[i]);
+                snprintf(full, sizeof(full), "%s/%s", fs->active_dir, names[i]);
                 hx_remove(full);
                 names[i][0] = '\0'; /* mark removed */
             }
@@ -448,7 +448,7 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
         to_compress = plain_count - fs->max_backup_files;
         for (i = 0; i < c.count && to_compress > 0; ++i) {
             if (!compressed[i] && names[i][0]) {
-                if (compress_or_delete_backup(fs->dir, names[i]) == 0) {
+                if (compress_or_delete_backup(fs->active_dir, names[i]) == 0) {
 #if defined(HX_CLOG_ENABLE_ZLIB)
                     compressed[i] = 2; /* now lives on disk as <name>.gz */
 #else
@@ -461,10 +461,19 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     }
 
     /* 3. cap the number of compressed backups so .gz files cannot pile up
-     * forever; delete the oldest beyond the limit. */
+     * forever; delete the oldest beyond the limit.
+     *   max_compressed_files < 0 : unlimited (never delete by count)
+     *   max_compressed_files > 0 : that many
+     *   max_compressed_files == 0: fall back to max_backup_files */
     {
-        int gz_cap = fs->max_compressed_files > 0 ? fs->max_compressed_files
-                                                  : fs->max_backup_files;
+        int gz_cap;
+        if (fs->max_compressed_files < 0) {
+            gz_cap = -1; /* unlimited */
+        } else if (fs->max_compressed_files > 0) {
+            gz_cap = fs->max_compressed_files;
+        } else {
+            gz_cap = fs->max_backup_files;
+        }
         if (gz_cap > 0) {
             int gz_count = 0;
             for (i = 0; i < c.count; ++i) {
@@ -477,10 +486,10 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
                     char full[HX_CLOG_PATH_MAX];
                     if (compressed[i] == 2) {
                         snprintf(full, sizeof(full), "%s/%s.gz",
-                                 fs->dir, names[i]);
+                                 fs->active_dir, names[i]);
                     } else {
                         snprintf(full, sizeof(full), "%s/%s",
-                                 fs->dir, names[i]);
+                                 fs->active_dir, names[i]);
                     }
                     if (hx_remove(full) == 0) {
                         names[i][0] = '\0';
@@ -566,6 +575,28 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
         return HX_CLOG_OK;
     }
 
+    /* date-subdir mode: a new day means a new folder, not an in-place
+     * archive. Close the current file and reopen — hx_file_open_active()
+     * recomputes the dated directory for "today" — leaving yesterday's files
+     * untouched in their own folder. Size rotation within the day still falls
+     * through to the normal archive path below. */
+    if (fs->date_subdir && need_daily) {
+        if (fs->fp) {
+            fflush(fs->fp);
+            fclose(fs->fp);
+            fs->fp = NULL;
+        }
+        if (hx_file_open_active(fs) != HX_CLOG_OK) {
+            hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                                 "date-subdir rollover: opening the new day's "
+                                 "log file failed");
+            return HX_CLOG_ERR_OPEN_FILE_FAILED;
+        }
+        fs->current_size = 0;
+        hx_core_add_rotated(1);
+        return HX_CLOG_OK;
+    }
+
     /* Use the date the *current* file belongs to for the archive tag. */
     {
         struct tm cur;
@@ -586,7 +617,7 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
         strncpy(ic.stem, stem, sizeof(ic.stem) - 1);
         strncpy(ic.date_tag, date_tag, sizeof(ic.date_tag) - 1);
         ic.max_index = 0;
-        list_dir(fs->dir, index_cb, &ic);
+        list_dir(fs->active_dir, index_cb, &ic);
         index = ic.max_index + 1;
         make_archive_name(archive, sizeof(archive), stem, ext, &cur, index);
     }
@@ -598,7 +629,7 @@ int hx_rotate_maybe(struct hx_file_sink_impl* fs, unsigned int incoming) {
         fs->fp = NULL;
     }
 
-    snprintf(archive_full, sizeof(archive_full), "%s/%s", fs->dir, archive);
+    snprintf(archive_full, sizeof(archive_full), "%s/%s", fs->active_dir, archive);
     if (hx_rename(fs->active_path, archive_full) != 0) {
         /* archive failed (file locked, permissions): keep appending to the
          * un-archived active file. hx_file_open_active() recomputes the real
@@ -659,7 +690,7 @@ int hx_rotate_force(struct hx_file_sink_impl* fs) {
     strncpy(ic.stem, stem, sizeof(ic.stem) - 1);
     strncpy(ic.date_tag, date_tag, sizeof(ic.date_tag) - 1);
     ic.max_index = 0;
-    list_dir(fs->dir, index_cb, &ic);
+    list_dir(fs->active_dir, index_cb, &ic);
     index = ic.max_index + 1;
     make_archive_name(archive, sizeof(archive), stem, ext, &tmv, index);
 
@@ -667,7 +698,7 @@ int hx_rotate_force(struct hx_file_sink_impl* fs) {
     fclose(fs->fp);
     fs->fp = NULL;
 
-    snprintf(archive_full, sizeof(archive_full), "%s/%s", fs->dir, archive);
+    snprintf(archive_full, sizeof(archive_full), "%s/%s", fs->active_dir, archive);
     if (hx_rename(fs->active_path, archive_full) != 0) {
         int first_failure = !fs->rename_failing;
         fs->rename_failing = 1;

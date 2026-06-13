@@ -22,6 +22,10 @@ add_executable(test_utf8path test_utf8path.c)
 target_link_libraries(test_utf8path PRIVATE hx_clog::hx_clog)
 add_test(NAME test_utf8path COMMAND test_utf8path)
 
+add_executable(test_date_subdir test_date_subdir.c)
+target_link_libraries(test_date_subdir PRIVATE hx_clog::hx_clog)
+add_test(NAME test_date_subdir COMMAND test_date_subdir)
+
 add_executable(test_crash test_crash.c)
 target_link_libraries(test_crash PRIVATE hx_clog::hx_clog)
 add_test(NAME test_crash COMMAND test_crash)
@@ -49,7 +53,7 @@ endif()
 if(WIN32 AND HX_CLOG_BUILD_SHARED)
     set(_hx_test_targets
         test_format test_rotate test_largeline test_features
-        test_rotate_time test_utf8path test_crash)
+        test_rotate_time test_utf8path test_date_subdir test_crash)
     if(HX_CLOG_ENABLE_ASYNC)
         list(APPEND _hx_test_targets test_async)
     endif()

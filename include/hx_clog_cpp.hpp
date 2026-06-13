@@ -108,6 +108,7 @@ public:
     Config& rotateAlign(bool v)               { cfg_.rotate_align = v ? 1 : 0; return *this; }
     Config& rotateOnStartup(bool v)           { cfg_.rotate_on_startup = v ? 1 : 0; return *this; }
     Config& maxCompressedFiles(int v)         { cfg_.max_compressed_files = v; return *this; }
+    Config& dateSubdir(bool v)                { cfg_.date_subdir = v ? 1 : 0; return *this; }
     Config& asyncQueueSize(unsigned int v)    { cfg_.async_queue_size = v; return *this; }
     Config& asyncBatchSize(unsigned int v)    { cfg_.async_batch_size = v; return *this; }
     Config& flushIntervalMs(unsigned int v)   { cfg_.flush_interval_ms = v; return *this; }

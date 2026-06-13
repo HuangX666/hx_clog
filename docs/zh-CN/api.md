@@ -179,14 +179,43 @@ int hx_clog_add_apple_log_sink(const char* subsystem, hx_clog_sink_id_t* out_id)
 cfg.rotate_interval_seconds = 3600; /* interval time rotation, 0=off */
 cfg.rotate_align = 1;               /* 1.1.0: align to wall-clock boundaries */
 cfg.rotate_on_startup = 1;          /* archive an existing active file at init */
-cfg.max_compressed_files = 20;      /* 1.1.0: cap .gz backups; 0=max_backup_files */
+cfg.max_compressed_files = 20;      /* cap .gz backups; -1=无上限（默认） */
+cfg.date_subdir = 1;               /* 1.2.0: 按天分目录，见下 */
 ```
 
 未配置 interval 时，`HX_CLOG_ROTATE_BY_TIME` 保持按天轮转；设置 `rotate_interval_seconds` 可获得按小时/分钟/秒风格的切分。`rotate_align = 1` 时，interval 会对齐到基于 epoch 的墙钟时间桶，因此 `3600` 表示 **整点** 轮转，而不是“文件打开后一个小时”。
 
-归档名带有 active 文件 **打开** 的日期，因此周五写入、周一轮转的文件会归档到周五日期下。
+归档名带有 active 文件 **打开** 的日期，因此周五写入、周一轮转的文件会归档到周五日期下。cleanup 按文件名里嵌入的 `日期+序号`（每次轮转都精确）排序，而不是按文件 mtime，所以即使大量轮转发生在同一秒内，也能正确保留真正最新的备份。
 
-当 zlib 可用且 `HX_CLOG_ENABLE_ZLIB=ON` 时，cleanup 会保留最新的 `max_backup_files` 个普通轮转备份，并将更旧的普通备份压缩为 `.gz`，而不是直接删除。`.gz` 备份数量本身也受 `max_compressed_files` 限制，默认沿用 `max_backup_files`，所以压缩备份不会无限累积；最旧的会先删除。压缩备份仍然参与 `max_backup_days` 年龄清理。
+### 保留策略（`max_backup_files` / `max_compressed_files`）
+
+| 字段 | 含义 | 取值 |
+| --- | --- | --- |
+| `max_backup_files` | 保留多少个最新备份为**未压缩明文** | `-1` 全部保留为明文、永不压缩、永不删除（**默认**）；`0` 永不压缩；`N>0` 留 N 个明文，更旧的压缩 |
+| `max_compressed_files` | `.gz` 备份数量上限 | `-1` 永不按数量删除（**默认**）；`0` 沿用 `max_backup_files`；`N>0` 保留最新 N 个 `.gz` |
+| `max_backup_days` | 删除超过 N 天的备份（明文或 `.gz`） | `0` 关闭（默认） |
+
+因此默认值（`-1` / `-1` / `0`）**什么都不删**——每个轮转文件都以明文保留。这是最不容易丢数据的设置，但磁盘占用会无限增长；想要有界策略，请设一个有限的 `max_backup_files`（启用压缩）和/或 `max_backup_days`（按天龄清理）。例如「留 2 个明文、其余压缩、gz 全留」：
+
+```c
+cfg.max_backup_files = 2;
+cfg.max_compressed_files = -1;   /* 或一个有限上限 */
+cfg.max_backup_days = 30;        /* 可选的天龄兜底 */
+```
+
+zlib 可用（`HX_CLOG_ENABLE_ZLIB=ON`）时，超过 `max_backup_files` 的备份会被压缩为 `.gz`；没有 zlib 时则直接删除。
+
+### 按天分目录（`date_subdir`，1.2.0）
+
+设 `cfg.date_subdir = 1`，active 日志会写入按天命名的 `YYYY-MM-DD` 子文件夹：
+
+```
+./logs/2026-06-13/app.log
+./logs/2026-06-13/app.2026-06-13.1.log   （大小轮转的归档也留在当天文件夹里）
+./logs/2026-06-14/app.log                （跨天自动切到新文件夹）
+```
+
+日期文件夹自动创建。跨天时 sink 直接切到新一天的文件夹，前一天的文件原样保留（不再 rename 归档）。大小轮转仍在每天的文件夹内生效。`file_name` 仍必须是纯文件名——日期段加在目录上，而非文件名里。
 
 ## 自定义 allocator
 

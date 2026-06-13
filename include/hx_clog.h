@@ -43,7 +43,7 @@ extern "C" {
  * Version
  * ------------------------------------------------------------------------- */
 #define HX_CLOG_VERSION_MAJOR 1
-#define HX_CLOG_VERSION_MINOR 1
+#define HX_CLOG_VERSION_MINOR 2
 #define HX_CLOG_VERSION_PATCH 0
 
 /* -------------------------------------------------------------------------
@@ -149,7 +149,11 @@ typedef struct hx_clog_config {
 
     hx_clog_rotate_policy_t rotate_policy;
     unsigned long long max_file_size;  /* e.g. 10 * 1024 * 1024 */
-    int max_backup_files;              /* e.g. 10 */
+    int max_backup_files;              /* number of newest backups kept as plain
+                                        * (uncompressed); older ones are
+                                        * compressed. -1 = keep all as plain
+                                        * (never compress, never delete);
+                                        * 0 = never compress. Default -1. */
     int max_backup_days;               /* keep files for at most N days, 0=off */
     int rotate_daily;                  /* split by day */
     unsigned int rotate_interval_seconds; /* interval time rotation, 0=off */
@@ -166,12 +170,20 @@ typedef struct hx_clog_config {
     void* formatter_user_data;
     const char* system_logger_name;    /* ident/source/tag for system sinks */
 
-    /* -- added in 1.1.0 (zero == old behaviour; always call
-     *    hx_clog_config_default() before filling the struct) -- */
+    /* -- added in 1.1.0 (always call hx_clog_config_default() before filling
+     *    the struct) -- */
     int rotate_align;                  /* align interval rotation to wall-clock
                                         * boundaries (e.g. 3600 -> on the hour) */
     int max_compressed_files;          /* cap on .gz backups kept after
-                                        * compression; 0 = use max_backup_files */
+                                        * compression. -1 = never delete by
+                                        * count (default); 0 = use
+                                        * max_backup_files; >0 = that many. */
+
+    /* -- added in 1.2.0 -- */
+    int date_subdir;                   /* when 1, the active log is written under
+                                        * a per-day folder: <log_dir>/<YYYY-MM-DD>/
+                                        * <file_name>, created automatically and
+                                        * switched at the day boundary. Default 0. */
 } hx_clog_config_t;
 
 HX_CLOG_API void hx_clog_config_default(hx_clog_config_t* config);

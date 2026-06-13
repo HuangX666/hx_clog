@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(hx_clog
-    VERSION 1.1.0
+    VERSION 1.2.0
     DESCRIPTION "A portable C/C++11 logging framework"
     LANGUAGES C CXX
 )

@@ -30,7 +30,27 @@ int hx_file_open_active(struct hx_file_sink_impl* fs) {
     struct tm tmv;
     long long sz;
 
-    join_path(fs->active_path, sizeof(fs->active_path), fs->dir, fs->base_name);
+    /* Resolve the effective directory first (it depends on "now" in
+     * date-subdir mode), so the day a file belongs to is captured together
+     * with the path it is opened at. */
+    hx_now(&ts);
+    hx_localtime(ts.sec, &tmv);
+
+    if (fs->date_subdir) {
+        char datebuf[16];
+        snprintf(datebuf, sizeof(datebuf), "%04d-%02d-%02d",
+                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+        join_path(fs->active_dir, sizeof(fs->active_dir), fs->dir, datebuf);
+        if (hx_mkdir_p(fs->active_dir) != 0 && !hx_file_exists(fs->active_dir)) {
+            return HX_CLOG_ERR_OPEN_FILE_FAILED;
+        }
+    } else {
+        strncpy(fs->active_dir, fs->dir, sizeof(fs->active_dir) - 1);
+        fs->active_dir[sizeof(fs->active_dir) - 1] = '\0';
+    }
+
+    join_path(fs->active_path, sizeof(fs->active_path),
+              fs->active_dir, fs->base_name);
 
     fs->fp = hx_fopen(fs->active_path, "ab");
     if (!fs->fp) {
@@ -40,8 +60,6 @@ int hx_file_open_active(struct hx_file_sink_impl* fs) {
     sz = hx_file_size(fs->active_path);
     fs->current_size = (sz > 0) ? (unsigned long long)sz : 0ULL;
 
-    hx_now(&ts);
-    hx_localtime(ts.sec, &tmv);
     fs->cur_year = tmv.tm_year;
     fs->cur_yday = tmv.tm_yday;
     fs->opened_sec = ts.sec;
@@ -151,13 +169,14 @@ hx_clog_sink_t* hx_sink_file_create(const char* dir, const char* file_name,
     strncpy(fs->base_name, file_name, sizeof(fs->base_name) - 1);
     fs->policy = cfg ? cfg->rotate_policy : HX_CLOG_ROTATE_NONE;
     fs->max_file_size = cfg ? cfg->max_file_size : 0;
-    fs->max_backup_files = cfg ? cfg->max_backup_files : 0;
+    fs->max_backup_files = cfg ? cfg->max_backup_files : -1;
     fs->max_backup_days = cfg ? cfg->max_backup_days : 0;
     fs->rotate_daily = cfg ? cfg->rotate_daily : 0;
     fs->rotate_interval_seconds = cfg ? cfg->rotate_interval_seconds : 0;
     fs->rotate_align = cfg ? cfg->rotate_align : 0;
     fs->rotate_on_startup = cfg ? cfg->rotate_on_startup : 0;
-    fs->max_compressed_files = cfg ? cfg->max_compressed_files : 0;
+    fs->max_compressed_files = cfg ? cfg->max_compressed_files : -1;
+    fs->date_subdir = cfg ? cfg->date_subdir : 0;
 
     hx_mutex_init(&fs->lock);
 

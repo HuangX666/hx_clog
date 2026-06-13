@@ -766,11 +766,14 @@ void hx_clog_config_default(hx_clog_config_t* config) {
     config->enable_apple_log = 0;
     config->rotate_policy = HX_CLOG_ROTATE_BY_SIZE_AND_TIME;
     config->max_file_size = 10ULL * 1024ULL * 1024ULL;
-    config->max_backup_files = 10;
+    config->max_backup_files = -1;     /* -1 = keep all backups (no auto delete) */
     config->max_backup_days = 0;
     config->rotate_daily = 1;
     config->rotate_interval_seconds = 0;
+    config->rotate_align = 0;
     config->rotate_on_startup = 0;
+    config->max_compressed_files = -1; /* -1 = never delete .gz by count */
+    config->date_subdir = 0;
     config->async_queue_size = 8192;
     config->async_batch_size = 64;
     config->flush_interval_ms = 1000;

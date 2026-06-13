@@ -198,7 +198,8 @@ On Unix/Apple targets, syslog support is compiled when
 cfg.rotate_interval_seconds = 3600; /* interval time rotation, 0=off */
 cfg.rotate_align = 1;               /* 1.1.0: align to wall-clock boundaries */
 cfg.rotate_on_startup = 1;          /* archive an existing active file at init */
-cfg.max_compressed_files = 20;      /* 1.1.0: cap .gz backups; 0=max_backup_files */
+cfg.max_compressed_files = 20;      /* cap .gz backups; -1=unlimited (default) */
+cfg.date_subdir = 1;               /* 1.2.0: per-day folder, see below */
 ```
 
 `HX_CLOG_ROTATE_BY_TIME` keeps day rotation when no interval is configured; set
@@ -208,14 +209,51 @@ so `3600` rotates **on the hour** instead of "one hour after the file was
 opened".
 
 Archive names carry the date the active file was **opened** — a file written on
-Friday and rotated on Monday is archived under Friday's date.
+Friday and rotated on Monday is archived under Friday's date. Cleanup orders
+backups by the date+index embedded in the name (exact per rotation), not by the
+file mtime, so it keeps the genuinely newest backups even when many rotations
+happen within the same second.
 
-When zlib is available and `HX_CLOG_ENABLE_ZLIB=ON`, cleanup keeps the newest
-`max_backup_files` plain rotated backups and compresses older plain backups to
-`.gz` instead of deleting them. The number of `.gz` backups is itself capped by
-`max_compressed_files` (defaulting to `max_backup_files`), so compressed
-backups cannot accumulate forever; the oldest are deleted first. Compressed
-backups are still eligible for `max_backup_days` age cleanup.
+### Retention (`max_backup_files` / `max_compressed_files`)
+
+| Field | Meaning | Values |
+| --- | --- | --- |
+| `max_backup_files` | how many newest backups stay **uncompressed** | `-1` keep all as plain, never compress, never delete (**default**); `0` never compress; `N>0` keep N plain, compress older |
+| `max_compressed_files` | cap on the number of `.gz` backups | `-1` never delete by count (**default**); `0` use `max_backup_files`; `N>0` keep N newest `.gz` |
+| `max_backup_days` | delete any backup (plain or `.gz`) older than N days | `0` off (default) |
+
+The defaults (`-1` / `-1` / `0`) therefore **never delete anything** — every
+rotated file is kept as plain text. This is the safest-against-data-loss
+setting but lets disk usage grow without bound; for a bounded policy set a
+finite `max_backup_files` (to enable compression) and/or `max_backup_days` (to
+age out old files). Example "keep 2 plain, compress the rest, keep all gz":
+
+```c
+cfg.max_backup_files = 2;
+cfg.max_compressed_files = -1;   /* or a finite cap */
+cfg.max_backup_days = 30;        /* optional age bound */
+```
+
+When zlib is available (`HX_CLOG_ENABLE_ZLIB=ON`) backups beyond
+`max_backup_files` are compressed to `.gz`; without zlib they are deleted
+instead.
+
+### Per-day folders (`date_subdir`, 1.2.0)
+
+Set `cfg.date_subdir = 1` to write the active log under a per-day folder named
+`YYYY-MM-DD`:
+
+```
+./logs/2026-06-13/app.log
+./logs/2026-06-13/app.2026-06-13.1.log   (size-rotation archives stay in the day folder)
+./logs/2026-06-14/app.log                (a new day -> a new folder, automatically)
+```
+
+The dated folder is created automatically. At the day boundary the sink simply
+switches to the new day's folder; the previous day's files are left untouched
+(no archive rename). Size-based rotation still applies within each day's folder.
+`file_name` must remain a plain file name — the date segment is added to the
+directory, not the file name.
 
 ## Custom allocator
 
