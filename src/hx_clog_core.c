@@ -651,9 +651,9 @@ void hx_clog_context_clear(void) {
  * Global logger state
  * ========================================================================= */
 typedef struct {
-    int initialized;
+    volatile int initialized;    /* atomic: read lock-free on the hot path */
     volatile int level;          /* atomic */
-    hx_clog_mode_t mode;
+    volatile int mode;           /* atomic: hx_clog_mode_t stored as int */
     struct hx_clog_logger default_logger;
 
     hx_clog_sink_t* sinks[HX_CLOG_MAX_SINKS];
@@ -679,6 +679,22 @@ typedef struct {
 } hx_core_state_t;
 
 static hx_core_state_t g_core;
+
+/* Atomic accessors for the two fields read lock-free on the hot path
+ * (write path / flush) while being written under init_lock. Keeping them
+ * atomic avoids a data race with concurrent reconfigure/shutdown. */
+static int core_is_initialized(void) {
+    return hx_atomic_load_level(&g_core.initialized);
+}
+static void core_set_initialized(int v) {
+    hx_atomic_store_level(&g_core.initialized, v);
+}
+static hx_clog_mode_t core_get_mode(void) {
+    return (hx_clog_mode_t)hx_atomic_load_level(&g_core.mode);
+}
+static void core_set_mode(hx_clog_mode_t m) {
+    hx_atomic_store_level(&g_core.mode, (int)m);
+}
 
 /* Per-thread snapshot of the global format settings, refreshed only when
  * format_gen changes, so the hot path normally takes no lock for them. */
@@ -710,6 +726,7 @@ typedef struct {
     int have_last;
     hx_clog_level_t last_level;
     int last_line;
+    char last_logger[128];
     char last_file[256];
     char last_msg[256];
     unsigned int last_msg_len;   /* full length (key uses first 255 bytes) */
@@ -1067,7 +1084,7 @@ static void close_non_callback_sinks_locked(void) {
 static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
     hx_clog_config_t cfg;
 
-    if (g_core.initialized) {
+    if (core_is_initialized()) {
         return HX_CLOG_ERR_ALREADY_INITIALIZED;
     }
 
@@ -1094,7 +1111,7 @@ static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
     g_core.format_mode = cfg.format_mode;
     g_core.formatter = cfg.formatter;
     g_core.formatter_user_data = cfg.formatter_user_data;
-    g_core.mode = cfg.mode;
+    core_set_mode(cfg.mode);
     g_core.sink_count = 0;
     hx_atomic_store_level(&g_core.override_count, 0);
     hx_atomic_store_level(&g_core.format_gen,
@@ -1135,16 +1152,16 @@ static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
 #if defined(HX_CLOG_ENABLE_ASYNC)
     if (cfg.mode == HX_CLOG_MODE_ASYNC) {
         if (hx_async_start(&cfg) != HX_CLOG_OK) {
-            g_core.mode = HX_CLOG_MODE_SYNC; /* fall back */
+            core_set_mode(HX_CLOG_MODE_SYNC); /* fall back */
         }
     }
 #else
     if (cfg.mode == HX_CLOG_MODE_ASYNC) {
-        g_core.mode = HX_CLOG_MODE_SYNC;
+        core_set_mode(HX_CLOG_MODE_SYNC);
     }
 #endif
 
-    g_core.initialized = 1;
+    core_set_initialized(1);
 
 #if defined(HX_CLOG_ENABLE_CRASH)
     if (cfg.enable_crash_handler) {
@@ -1168,18 +1185,18 @@ int hx_clog_init(const hx_clog_config_t* in_config) {
 }
 
 int hx_clog_is_initialized(void) {
-    return g_core.initialized;
+    return core_is_initialized();
 }
 
 static void dup_flush_pending(void); /* defined with the write path below */
 
 void hx_clog_flush(void) {
-    if (!g_core.initialized) {
+    if (!core_is_initialized()) {
         return;
     }
     dup_flush_pending(); /* emit a pending "repeated N times" line first */
 #if defined(HX_CLOG_ENABLE_ASYNC)
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
         hx_async_flush();
     }
 #endif
@@ -1190,15 +1207,15 @@ void hx_clog_shutdown(void) {
     int i;
     ensure_once();
     hx_mutex_lock(&g_core.init_lock);
-    if (!g_core.initialized) {
+    if (!core_is_initialized()) {
         hx_mutex_unlock(&g_core.init_lock);
         return;
     }
     dup_flush_pending(); /* emit a trailing "repeated N times" if pending */
-    g_core.initialized = 0; /* stop accepting new logs first */
+    core_set_initialized(0); /* stop accepting new logs first */
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
         hx_async_stop(); /* drains queue into sinks */
     }
 #endif
@@ -1289,7 +1306,7 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
     hx_clog_config_t defaults;
     hx_clog_sink_t* new_file = NULL;
 
-    if (!g_core.initialized) {
+    if (!core_is_initialized()) {
         return HX_CLOG_ERR_NOT_INITIALIZED;
     }
     if (!in_config) {
@@ -1325,7 +1342,7 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
     hx_clog_flush();
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
         hx_async_stop();
     }
 #endif
@@ -1361,19 +1378,19 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
         hx_sink_file_reopen(new_file);
     }
     add_configured_system_sinks(&cfg);
-    g_core.mode = cfg.mode;
+    core_set_mode(cfg.mode);
     recompute_override_count_locked(); /* surviving callback sinks may have overrides */
     hx_mutex_unlock(&g_core.sink_lock);
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
         if (hx_async_start(&cfg) != HX_CLOG_OK) {
-            g_core.mode = HX_CLOG_MODE_SYNC;
+            core_set_mode(HX_CLOG_MODE_SYNC);
         }
     }
 #else
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
-        g_core.mode = HX_CLOG_MODE_SYNC;
+    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
+        core_set_mode(HX_CLOG_MODE_SYNC);
     }
 #endif
     return HX_CLOG_OK;
@@ -1390,7 +1407,7 @@ int hx_clog_reconfigure(const hx_clog_config_t* in_config) {
 
 int hx_clog_reopen(void) {
     int i, rc = HX_CLOG_OK;
-    if (!g_core.initialized) {
+    if (!core_is_initialized()) {
         return HX_CLOG_ERR_NOT_INITIALIZED;
     }
     hx_mutex_lock(&g_core.sink_lock);
@@ -1610,7 +1627,7 @@ int hx_clog_get_sink_count(unsigned int* count) {
 }
 
 int hx_clog_set_allocator(const hx_clog_allocator_t* allocator) {
-    if (g_core.initialized) {
+    if (core_is_initialized()) {
         return HX_CLOG_ERR_ALREADY_INITIALIZED;
     }
     hx_clog__set_allocator(allocator);
@@ -1635,7 +1652,7 @@ void hx_clog_after_fork_child(void) {
         }
     }
 #if defined(HX_CLOG_ENABLE_ASYNC)
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
         hx_async_after_fork_child(); /* re-init locks + restart the worker */
     }
 #endif
@@ -1733,7 +1750,7 @@ static void core_dispatch_line(hx_clog_level_t level, const char* line,
                                unsigned int len, hx_clog_sink_id_t target,
                                int count_stats) {
 #if defined(HX_CLOG_ENABLE_ASYNC)
-    if (g_core.mode == HX_CLOG_MODE_ASYNC) {
+    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
         hx_async_enqueue(level, line, len, target, count_stats);
         return;
     }
@@ -1855,7 +1872,7 @@ static void dup_emit_summary(hx_clog_level_t level, const char* logger_name,
     hx_timestamp_t ts;
     int n;
 
-    if (!g_core.initialized || repeats == 0) {
+    if (!core_is_initialized() || repeats == 0) {
         return;
     }
     n = snprintf(msg, sizeof(msg), "last message repeated %llu times",
@@ -1885,16 +1902,20 @@ static void dup_emit_summary(hx_clog_level_t level, const char* logger_name,
 static void dup_flush_pending(void) {
     unsigned long long repeats = 0;
     hx_clog_level_t level = HX_CLOG_LEVEL_INFO;
+    char logger[128];
+    logger[0] = '\0';
     hx_mutex_lock(&g_dup.lock);
     if (g_dup.repeats > 0) {
         repeats = g_dup.repeats;
         level = g_dup.last_level;
+        strncpy(logger, g_dup.last_logger, sizeof(logger) - 1);
+        logger[sizeof(logger) - 1] = '\0';
         g_dup.repeats = 0;
         g_dup.have_last = 0;
     }
     hx_mutex_unlock(&g_dup.lock);
     if (repeats > 0) {
-        dup_emit_summary(level, NULL, repeats);
+        dup_emit_summary(level, logger, repeats);
     }
 }
 
@@ -1906,10 +1927,14 @@ static int dup_check_and_update(hx_clog_level_t level, const char* file,
     int suppressed = 0;
     unsigned long long summary_repeats = 0;
     hx_clog_level_t summary_level = HX_CLOG_LEVEL_INFO;
+    char summary_logger[128];
     unsigned int klen = msg_len < sizeof(g_dup.last_msg) - 1
                             ? msg_len : (unsigned int)sizeof(g_dup.last_msg) - 1;
+    const char* logger = logger_name ? logger_name : "";
     hx_timestamp_t ts;
     long long now_ms;
+
+    summary_logger[0] = '\0';
 
     hx_now(&ts);
     now_ms = (long long)ts.sec * 1000LL + (long long)ts.msec;
@@ -1923,6 +1948,7 @@ static int dup_check_and_update(hx_clog_level_t level, const char* file,
         g_dup.last_level == level &&
         g_dup.last_line == line &&
         g_dup.last_msg_len == msg_len &&
+        strncmp(g_dup.last_logger, logger, sizeof(g_dup.last_logger) - 1) == 0 &&
         strncmp(g_dup.last_file, file ? file : "",
                 sizeof(g_dup.last_file) - 1) == 0 &&
         strncmp(g_dup.last_msg, msg, klen) == 0 &&
@@ -1934,11 +1960,17 @@ static int dup_check_and_update(hx_clog_level_t level, const char* file,
         if (g_dup.repeats > 0) {
             summary_repeats = g_dup.repeats;
             summary_level = g_dup.last_level;
+            /* the summary describes the previous run, so it must carry that
+             * run's logger, not the new message's */
+            strncpy(summary_logger, g_dup.last_logger, sizeof(summary_logger) - 1);
+            summary_logger[sizeof(summary_logger) - 1] = '\0';
         }
         g_dup.repeats = 0;
         g_dup.have_last = 1;
         g_dup.last_level = level;
         g_dup.last_line = line;
+        strncpy(g_dup.last_logger, logger, sizeof(g_dup.last_logger) - 1);
+        g_dup.last_logger[sizeof(g_dup.last_logger) - 1] = '\0';
         strncpy(g_dup.last_file, file ? file : "", sizeof(g_dup.last_file) - 1);
         g_dup.last_file[sizeof(g_dup.last_file) - 1] = '\0';
         memcpy(g_dup.last_msg, msg, klen);
@@ -1949,7 +1981,7 @@ static int dup_check_and_update(hx_clog_level_t level, const char* file,
     hx_mutex_unlock(&g_dup.lock);
 
     if (summary_repeats > 0) {
-        dup_emit_summary(summary_level, logger_name, summary_repeats);
+        dup_emit_summary(summary_level, summary_logger, summary_repeats);
     }
     return suppressed;
 }
@@ -1970,7 +2002,7 @@ static void core_writev(const char* logger_name,
     va_list args_copy;
 
     /* fast level filter before any work */
-    if (!g_core.initialized) {
+    if (!core_is_initialized()) {
         return;
     }
     if ((int)level < hx_atomic_load_level(&g_core.level) ||

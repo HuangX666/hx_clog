@@ -199,6 +199,18 @@ int main(void) {
         HX_LOG_INFO("after-dup");    /* flushes "repeated 2 times" + itself */
         CHECK(g_count == 3);
         CHECK(strstr(g_last, "after-dup") != NULL);
+
+        /* same file/line/level/message but different named loggers must NOT
+         * be folded into one another (logger is part of the dedup key) */
+        g_count = 0;
+        hx_clog_write_named(HX_CLOG_LEVEL_INFO, "dupA", "dupkey.c", 7, "fn", "same");
+        hx_clog_write_named(HX_CLOG_LEVEL_INFO, "dupB", "dupkey.c", 7, "fn", "same");
+        CHECK(g_count == 2);
+        /* but the same logger repeating IS folded */
+        g_count = 0;
+        hx_clog_write_named(HX_CLOG_LEVEL_INFO, "dupB", "dupkey.c", 7, "fn", "same");
+        CHECK(g_count == 0); /* suppressed: identical to the previous dupB line */
+
         CHECK(hx_clog_set_duplicate_suppression(0, 0) == HX_CLOG_OK);
         g_count = 0;
         HX_LOG_INFO("nodup");
