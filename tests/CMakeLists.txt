@@ -40,6 +40,12 @@ if(HX_CLOG_ENABLE_ASYNC)
     add_executable(test_async test_async.c)
     target_link_libraries(test_async PRIVATE hx_clog::hx_clog)
     add_test(NAME test_async COMMAND test_async)
+
+    # regression tests for the 1.2.0 audit findings (S-01..S-03, M-04); the
+    # concurrent reconfigure case exercises the async engine
+    add_executable(test_audit_fixes test_audit_fixes.c)
+    target_link_libraries(test_audit_fixes PRIVATE hx_clog::hx_clog)
+    add_test(NAME test_audit_fixes COMMAND test_audit_fixes)
 endif()
 
 if(HX_CLOG_ENABLE_CPP11)
@@ -55,7 +61,7 @@ if(WIN32 AND HX_CLOG_BUILD_SHARED)
         test_format test_rotate test_largeline test_features
         test_rotate_time test_utf8path test_date_subdir test_crash)
     if(HX_CLOG_ENABLE_ASYNC)
-        list(APPEND _hx_test_targets test_async)
+        list(APPEND _hx_test_targets test_async test_audit_fixes)
     endif()
     if(HX_CLOG_ENABLE_CPP11)
         list(APPEND _hx_test_targets test_cpp11)

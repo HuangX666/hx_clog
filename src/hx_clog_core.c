@@ -87,6 +87,8 @@ void* hx_clog__realloc(void* ptr, size_t old_size, size_t new_size) {
 #if defined(HX_PLATFORM_WINDOWS)
 
 void hx_mutex_init(hx_mutex_t* m)    { InitializeCriticalSection(m); }
+/* CRITICAL_SECTION is already recursive on the owning thread. */
+void hx_mutex_init_recursive(hx_mutex_t* m) { InitializeCriticalSection(m); }
 void hx_mutex_destroy(hx_mutex_t* m) { DeleteCriticalSection(m); }
 void hx_mutex_lock(hx_mutex_t* m)    { EnterCriticalSection(m); }
 void hx_mutex_unlock(hx_mutex_t* m)  { LeaveCriticalSection(m); }
@@ -135,6 +137,13 @@ void hx_thread_join(hx_thread_t t) {
 #else /* POSIX */
 
 void hx_mutex_init(hx_mutex_t* m)    { pthread_mutex_init(m, NULL); }
+void hx_mutex_init_recursive(hx_mutex_t* m) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(m, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
 void hx_mutex_destroy(hx_mutex_t* m) { pthread_mutex_destroy(m); }
 void hx_mutex_lock(hx_mutex_t* m)    { pthread_mutex_lock(m); }
 void hx_mutex_unlock(hx_mutex_t* m)  { pthread_mutex_unlock(m); }
@@ -301,18 +310,28 @@ void hx_now(hx_timestamp_t* ts) {
 #endif
 }
 
+#if defined(HX_PLATFORM_WINDOWS) && !defined(_MSC_VER)
+/* MinGW has no guaranteed localtime_r; plain localtime() returns a pointer into
+ * a shared static buffer, so concurrent business threads racing here would
+ * corrupt each other's struct tm. Serialize the call + copy with a dedicated
+ * lock (initialized in core_once_init / hx_clog_after_fork_child). */
+static hx_mutex_t g_time_lock;
+#endif
+
 void hx_localtime(time_t t, struct tm* out) {
 #if defined(_MSC_VER)
     localtime_s(out, &t);
 #elif defined(HX_PLATFORM_WINDOWS)
+    hx_mutex_lock(&g_time_lock);
     {
-        struct tm* tmp = localtime(&t); /* MinGW: no localtime_r guarantee */
+        struct tm* tmp = localtime(&t);
         if (tmp) {
             *out = *tmp;
         } else {
             memset(out, 0, sizeof(*out));
         }
     }
+    hx_mutex_unlock(&g_time_lock);
 #else
     localtime_r(&t, out);
 #endif
@@ -577,8 +596,13 @@ static int context_key_index(const char* key) {
     if (!key || !key[0]) {
         return -1;
     }
+    /* Keys are stored truncated to HX_CONTEXT_KEY_MAX-1 bytes. Compare with the
+     * same truncation so an over-long key matches the entry it was stored as —
+     * otherwise a full-length strcmp never matches the truncated copy, and each
+     * put() of the same long key allocates a fresh slot until all 16 are
+     * exhausted (and remove() can never find it). */
     for (i = 0; i < g_tls_context.count; ++i) {
-        if (strcmp(g_tls_context.keys[i], key) == 0) {
+        if (strncmp(g_tls_context.keys[i], key, HX_CONTEXT_KEY_MAX - 1) == 0) {
             return i;
         }
     }
@@ -953,17 +977,63 @@ void hx_core_flush_sinks(void) {
     hx_mutex_unlock(&g_core.sink_lock);
 }
 
+#if !defined(HX_PLATFORM_WINDOWS)
+/* pthread_atfork handlers. The prepare handler acquires every global lock in a
+ * fixed order (consistent with all nested lock orders in the code: init→sink→
+ * stats→async, and sink→ring/err/dup are leaf-or-sequential), so at the moment
+ * fork() runs no other thread holds any of them. The parent and child handlers
+ * release them again. Because the forking thread itself owns the locks across
+ * the fork, the child inherits them valid and *unlocked* — without this, the
+ * child had to re-init mutexes that might have been held by a vanished parent
+ * thread, which is undefined behaviour. hx_clog_after_fork_child() still
+ * restarts the worker and reopens files; with this in place its lock re-inits
+ * now only ever run on known-unlocked mutexes. */
+static void hx_atfork_prepare(void) {
+    hx_mutex_lock(&g_core.init_lock);
+    hx_mutex_lock(&g_core.sink_lock);
+    hx_mutex_lock(&g_core.stats_lock);
+#if defined(HX_CLOG_ENABLE_ASYNC)
+    hx_async_atfork_lock();
+#endif
+    hx_mutex_lock(&g_err_lock);
+    hx_mutex_lock(&g_dup.lock);
+    /* g_ring_lock is created lazily (only once the crash ring is used); skip it
+     * when not yet initialized — g_ring_inited is monotonic so prepare/release
+     * see the same value across a single fork. */
+    if (g_ring_inited) {
+        hx_mutex_lock(&g_ring_lock);
+    }
+}
+static void hx_atfork_release(void) {
+    if (g_ring_inited) {
+        hx_mutex_unlock(&g_ring_lock);
+    }
+    hx_mutex_unlock(&g_dup.lock);
+    hx_mutex_unlock(&g_err_lock);
+#if defined(HX_CLOG_ENABLE_ASYNC)
+    hx_async_atfork_unlock();
+#endif
+    hx_mutex_unlock(&g_core.stats_lock);
+    hx_mutex_unlock(&g_core.sink_lock);
+    hx_mutex_unlock(&g_core.init_lock);
+}
+#endif /* !HX_PLATFORM_WINDOWS */
+
 /* =========================================================================
  * Lifecycle
  * ========================================================================= */
 static void core_once_init(void) {
     memset(&g_core, 0, sizeof(g_core));
-    hx_mutex_init(&g_core.sink_lock);
+    /* recursive: user callbacks run under sink_lock and may re-enter the API */
+    hx_mutex_init_recursive(&g_core.sink_lock);
     hx_mutex_init(&g_core.stats_lock);
     hx_mutex_init(&g_core.init_lock);
     hx_mutex_init(&g_err_lock);
     memset(&g_dup, 0, sizeof(g_dup));
     hx_mutex_init(&g_dup.lock);
+#if defined(HX_PLATFORM_WINDOWS) && !defined(_MSC_VER)
+    hx_mutex_init(&g_time_lock); /* MinGW localtime() serialization */
+#endif
     g_core.level = HX_CLOG_LEVEL_INFO;
     g_core.default_logger.is_default = 1;
     strcpy(g_core.default_logger.name, "hx_clog");
@@ -971,6 +1041,10 @@ static void core_once_init(void) {
     g_core.next_sink_id = 1;
     g_core.format_mode = HX_CLOG_FORMAT_PATTERN;
     g_core.format_gen = 1; /* TLS caches start at 0 => first use refreshes */
+#if !defined(HX_PLATFORM_WINDOWS)
+    /* keep every global lock consistent across fork() (see handlers above) */
+    pthread_atfork(hx_atfork_prepare, hx_atfork_release, hx_atfork_release);
+#endif
 }
 
 #if defined(HX_PLATFORM_WINDOWS)
@@ -1346,6 +1420,14 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
     if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
+        /* Switch producers onto the synchronous path *before* stopping the
+         * engine. Otherwise the mode still reads ASYNC while the queue is gone,
+         * and every concurrent write enqueues into a stopped engine and is lost
+         * without being counted (breaking BLOCK's no-loss contract). Once mode
+         * is SYNC, in-flight producers either take the sync path directly or,
+         * if already inside the stopped enqueue, fall back to a sync write via
+         * core_dispatch_line(). */
+        core_set_mode(HX_CLOG_MODE_SYNC);
         hx_async_stop();
     }
 #endif
@@ -1381,19 +1463,19 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
         hx_sink_file_reopen(new_file);
     }
     add_configured_system_sinks(&cfg);
-    core_set_mode(cfg.mode);
+    /* Stay on the synchronous path through the swap; only publish ASYNC mode
+     * once the new worker is actually running (below). This closes the window
+     * where producers would otherwise see ASYNC with no engine behind it. */
+    core_set_mode(HX_CLOG_MODE_SYNC);
     recompute_override_count_locked(); /* surviving callback sinks may have overrides */
     hx_mutex_unlock(&g_core.sink_lock);
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
-    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
-        if (hx_async_start(&cfg) != HX_CLOG_OK) {
-            core_set_mode(HX_CLOG_MODE_SYNC);
+    if (cfg.mode == HX_CLOG_MODE_ASYNC) {
+        if (hx_async_start(&cfg) == HX_CLOG_OK) {
+            core_set_mode(HX_CLOG_MODE_ASYNC);
         }
-    }
-#else
-    if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
-        core_set_mode(HX_CLOG_MODE_SYNC);
+        /* on failure: stay in SYNC (already set) */
     }
 #endif
     return HX_CLOG_OK;
@@ -1430,6 +1512,11 @@ int hx_clog_get_stats(hx_clog_stats_t* stats) {
     if (!stats) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
     }
+    /* make the getter safe to call before the first init: ensure_once()
+     * constructs stats_lock (and the rest of the module). Without it the
+     * very first call locks an uninitialized mutex and faults. Other getters
+     * (e.g. hx_clog_get_sink_count) already do this; match them. */
+    ensure_once();
     hx_mutex_lock(&g_core.stats_lock);
     stats->written_lines = g_core.written_lines;
     stats->rotated_files = g_core.rotated_files;
@@ -1643,11 +1730,14 @@ void hx_clog_after_fork_child(void) {
     int i;
     /* Re-init every lock that may have been held by a parent thread at fork
      * time. Threads do not survive fork, so this is safe in the child. */
-    hx_mutex_init(&g_core.sink_lock);
+    hx_mutex_init_recursive(&g_core.sink_lock);
     hx_mutex_init(&g_core.stats_lock);
     hx_mutex_init(&g_core.init_lock);
     hx_mutex_init(&g_err_lock);
     hx_mutex_init(&g_dup.lock);
+#if defined(HX_PLATFORM_WINDOWS) && !defined(_MSC_VER)
+    hx_mutex_init(&g_time_lock);
+#endif
     hx_ring_after_fork_child();
     for (i = 0; i < g_core.sink_count; ++i) {
         if (g_core.sinks[i] && g_core.sinks[i]->is_file) {
@@ -1691,11 +1781,12 @@ static unsigned int format_line(const hx_clog_record_t* rec,
     unsigned int n;
     if (formatter) {
         n = formatter(rec, out, out_size, formatter_user_data);
+        /* formatters follow snprintf semantics: n is the length that WOULD be
+         * written. NUL-terminate within bounds, but return the full required
+         * length so format_with_retry() can grow and reformat exactly once. */
         if (out && out_size > 0) {
-            if (n >= out_size) {
-                n = out_size - 1;
-            }
-            out[n] = '\0';
+            unsigned int w = (n >= out_size) ? out_size - 1 : n;
+            out[w] = '\0';
         }
         return n;
     }
@@ -1717,32 +1808,42 @@ static void format_with_retry(const hx_clog_record_t* rec,
                               char** heap_out,
                               const char** line_out,
                               unsigned int* len_out) {
-    unsigned int len = format_line(rec, stackbuf, stack_size,
-                                   pattern, mode, formatter, formatter_user_data);
+    /* format_line() returns the *required* length (snprintf semantics), which
+     * may exceed stack_size when a pattern repeats %v/%x/%F or the message is
+     * long. That exact figure lets us size the heap buffer precisely instead of
+     * guessing from message_len — the old heuristic under-counted repeated
+     * placeholders and truncated lines far below the configured cap. */
+    unsigned int needed = format_line(rec, stackbuf, stack_size,
+                                      pattern, mode, formatter, formatter_user_data);
     *heap_out = NULL;
-    *line_out = stackbuf;
-    *len_out = len;
-    if (len + 1 >= stack_size) {
-        /* likely truncated; retry on heap. JSON escaping can expand the
-         * payload up to 6x (\u00xx), so size accordingly. */
-        unsigned int mul = (mode == HX_CLOG_FORMAT_JSON && !formatter) ? 6u : 1u;
-        unsigned long long ctx_len =
-            rec->context ? (unsigned long long)strlen(rec->context) : 0ULL;
-        unsigned long long need = (unsigned long long)rec->message_len * mul +
-                                  ctx_len * mul + 2048ULL;
-        unsigned int cap;
-        char* hp;
-        if (need > 0xFFFFFFFFULL) {
-            need = 0xFFFFFFFFULL;
-        }
-        cap = hx_clamp_line((unsigned int)need);
-        hp = (char*)hx_clog__malloc(cap);
+    if (needed + 1 <= stack_size) {
+        /* fit entirely in the stack buffer; needed == bytes written */
+        *line_out = stackbuf;
+        *len_out = needed;
+        return;
+    }
+    {
+        /* grow to exactly what the line needs, clamped to the per-line cap */
+        unsigned int want = (needed < 0xFFFFFFFFu) ? needed + 1 : 0xFFFFFFFFu;
+        unsigned int cap = hx_clamp_line(want);
+        char* hp = (char*)hx_clog__malloc(cap);
         if (hp) {
-            len = format_line(rec, hp, cap,
-                              pattern, mode, formatter, formatter_user_data);
+            unsigned int got = format_line(rec, hp, cap,
+                                           pattern, mode, formatter,
+                                           formatter_user_data);
+            if (got > cap - 1) {
+                got = cap - 1; /* the line cap (or a misbehaving formatter)
+                                * limited the actual write; never report more
+                                * than was written, to avoid an over-read */
+            }
             *heap_out = hp;
             *line_out = hp;
-            *len_out = len;
+            *len_out = got;
+        } else {
+            /* OOM: emit the truncated stack content rather than dropping the
+             * line. pos never exceeds stack_size-1, so this is a safe length. */
+            *line_out = stackbuf;
+            *len_out = stack_size - 1;
         }
     }
 }
@@ -1754,7 +1855,18 @@ static void core_dispatch_line(hx_clog_level_t level, const char* line,
                                int count_stats) {
 #if defined(HX_CLOG_ENABLE_ASYNC)
     if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
-        hx_async_enqueue(level, line, len, target, count_stats);
+        int rc = hx_async_enqueue(level, line, len, target, count_stats);
+        /* HX_CLOG_ERR_NOT_INITIALIZED means the async engine is not currently
+         * accepting work — the only time that happens while the mode still
+         * reads ASYNC is the brief window inside hx_clog_reconfigure() between
+         * stopping the old engine and starting the new one. Falling back to a
+         * direct sink write keeps that window lossless (the emit blocks on
+         * sink_lock until the reconfigure swap finishes, then writes to the new
+         * sinks). Policy-driven drops (QUEUE_FULL / OUT_OF_MEMORY) are honored
+         * and already counted, so they are not retried here. */
+        if (rc == HX_CLOG_ERR_NOT_INITIALIZED) {
+            hx_core_emit_to_sinks(level, line, len, target, count_stats);
+        }
         return;
     }
 #endif

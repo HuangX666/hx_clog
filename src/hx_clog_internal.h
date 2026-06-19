@@ -6,6 +6,16 @@
 #ifndef HX_CLOG_INTERNAL_H
 #define HX_CLOG_INTERNAL_H
 
+/* MinGW's default printf family routes to the old msvcrt, whose vsnprintf does
+ * NOT follow C99: on truncation it returns -1 instead of the required length.
+ * The write path relies on that length to size the heap retry, so without this
+ * a long message makes vsnprintf return -1 and the whole line is dropped. Ask
+ * MinGW for its C99-conformant implementation. Must be defined before any
+ * system header (stdarg.h below pulls in _mingw.h, which latches this). */
+#if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)
+#  define __USE_MINGW_ANSI_STDIO 1
+#endif
+
 #include "hx_clog.h"
 
 #include <stdio.h>
@@ -106,6 +116,11 @@ typedef pthread_t       hx_thread_t;
 #endif
 
 void hx_mutex_init(hx_mutex_t* m);
+/* Like hx_mutex_init but the mutex may be re-locked by the thread that already
+ * holds it. Used for sink_lock so a user callback running under the lock can
+ * safely re-enter the public API (e.g. get_sink_count) without self-deadlock.
+ * Windows CRITICAL_SECTION is already recursive; POSIX needs an explicit attr. */
+void hx_mutex_init_recursive(hx_mutex_t* m);
 void hx_mutex_destroy(hx_mutex_t* m);
 void hx_mutex_lock(hx_mutex_t* m);
 void hx_mutex_unlock(hx_mutex_t* m);
@@ -271,6 +286,10 @@ void hx_async_flush(void);
 void hx_async_after_fork_child(void); /* re-init locks, restart worker */
 unsigned long long hx_async_dropped(void);
 unsigned long long hx_async_high_watermark(void);
+/* Acquire/release the async queue lock; used only by the pthread_atfork
+ * handlers so the queue lock is held across fork() and inherited unlocked. */
+void hx_async_atfork_lock(void);
+void hx_async_atfork_unlock(void);
 #endif
 
 /* -------------------------------------------------------------------------

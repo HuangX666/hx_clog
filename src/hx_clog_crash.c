@@ -646,7 +646,11 @@ int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config) {
     }
     strncpy(g_crash_dir, g_cc.crash_dir ? g_cc.crash_dir : "./logs",
             sizeof(g_crash_dir) - 1);
-    hx_mkdir_p(g_crash_dir);
+    if (hx_mkdir_p(g_crash_dir) != 0) {
+        hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
+                             "crash handler: could not create the crash directory;"
+                             " reports may fail to write");
+    }
     hx_ring_init();
 
 #if defined(HX_CLOG_ENABLE_STACKTRACE) && defined(HX_CRASH_HAVE_EXECINFO)
@@ -658,23 +662,57 @@ int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config) {
     }
 #endif
 
-    /* run the handler on its own stack so stack-overflow faults still
-     * produce a report */
+    /* run the handler on its own stack so stack-overflow faults still produce a
+     * report. If sigaltstack is unavailable (some embedded/POSIX-lite targets)
+     * do NOT pass SA_ONSTACK below: the kernel could otherwise be told to use a
+     * stack that was never installed. */
     memset(&ss, 0, sizeof(ss));
     ss.ss_sp = g_altstack;
     ss.ss_size = sizeof(g_altstack);
     ss.ss_flags = 0;
     if (sigaltstack(&ss, &g_prev_altstack) == 0) {
         g_altstack_installed = 1;
+    } else {
+        hx_core_report_error(HX_CLOG_ERR_PLATFORM,
+                             "crash handler: sigaltstack failed; installing "
+                             "without an alternate signal stack");
     }
 
     memset(&sa, 0, sizeof(sa));
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    if (g_altstack_installed) {
+        sa.sa_flags |= SA_ONSTACK;
+    }
     sa.sa_sigaction = posix_handler;
 
-    for (i = 0; i < K_NSIGNALS; ++i) {
-        sigaction(k_signals[i], &sa, &g_prev_actions[i]);
+    {
+        int installed = 0;
+        for (i = 0; i < K_NSIGNALS; ++i) {
+            if (sigaction(k_signals[i], &sa, &g_prev_actions[i]) == 0) {
+                installed++;
+            } else {
+                /* leave a known-good "previous action" so uninstall is a no-op
+                 * for this slot rather than restoring garbage */
+                memset(&g_prev_actions[i], 0, sizeof(g_prev_actions[i]));
+                g_prev_actions[i].sa_handler = SIG_DFL;
+            }
+        }
+        if (installed == 0) {
+            hx_core_report_error(HX_CLOG_ERR_PLATFORM,
+                                 "crash handler: no signal handlers could be "
+                                 "installed");
+            if (g_altstack_installed) {
+                sigaltstack(&g_prev_altstack, NULL);
+                g_altstack_installed = 0;
+            }
+            return HX_CLOG_ERR_PLATFORM;
+        }
+        if (installed < K_NSIGNALS) {
+            hx_core_report_error(HX_CLOG_ERR_PLATFORM,
+                                 "crash handler: some signal handlers could not "
+                                 "be installed");
+        }
     }
     g_crash_installed = 1;
     return HX_CLOG_OK;

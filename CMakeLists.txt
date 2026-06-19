@@ -87,6 +87,16 @@ target_include_directories(hx_clog
 
 target_compile_features(hx_clog PUBLIC c_std_99)
 
+if(MINGW)
+    # MinGW's default msvcrt printf family is not C99: vsnprintf returns -1 on
+    # truncation instead of the required length, which the write path needs to
+    # size its heap retry (otherwise long messages are silently dropped).
+    # Request MinGW's conformant implementation. internal.h sets this as well so
+    # non-CMake builds are covered; defining it here keeps it consistent for
+    # consumers that include our headers.
+    target_compile_definitions(hx_clog PUBLIC __USE_MINGW_ANSI_STDIO=1)
+endif()
+
 if(HX_CLOG_ENABLE_CPP11)
     target_compile_features(hx_clog PUBLIC cxx_std_11)
     target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_CPP11=1)

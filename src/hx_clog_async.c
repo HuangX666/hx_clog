@@ -163,8 +163,12 @@ int hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size,
                     hx_cond_wait(&g_async_not_full, &g_async_lock);
                 }
                 if (g_async.stop || !g_async.running) {
+                    /* the engine is being torn down (e.g. mid-reconfigure)
+                     * while we were blocked. Report "engine unavailable" so the
+                     * caller falls back to a synchronous write instead of
+                     * silently losing the line — BLOCK must never drop. */
                     hx_mutex_unlock(&g_async_lock);
-                    return HX_CLOG_ERR_QUEUE_FULL;
+                    return HX_CLOG_ERR_NOT_INITIALIZED;
                 }
                 break;
         }
@@ -410,11 +414,39 @@ void hx_async_after_fork_child(void) {
     }
 }
 
+void hx_async_atfork_lock(void) {
+    if (g_async_prims_ready) {
+        hx_mutex_lock(&g_async_lock);
+    }
+}
+void hx_async_atfork_unlock(void) {
+    if (g_async_prims_ready) {
+        hx_mutex_unlock(&g_async_lock);
+    }
+}
+
 unsigned long long hx_async_dropped(void) {
-    return g_async.dropped;
+    unsigned long long v;
+    if (!g_async_prims_ready) {
+        return 0;
+    }
+    /* dropped/high_watermark are written under g_async_lock by the producers
+     * and the worker; read them under the same lock so a concurrent update
+     * cannot tear the value (and to stay free of C11 data-race UB). */
+    hx_mutex_lock(&g_async_lock);
+    v = g_async.dropped;
+    hx_mutex_unlock(&g_async_lock);
+    return v;
 }
 unsigned long long hx_async_high_watermark(void) {
-    return g_async.high_watermark;
+    unsigned long long v;
+    if (!g_async_prims_ready) {
+        return 0;
+    }
+    hx_mutex_lock(&g_async_lock);
+    v = g_async.high_watermark;
+    hx_mutex_unlock(&g_async_lock);
+    return v;
 }
 
 #endif /* HX_CLOG_ENABLE_ASYNC */

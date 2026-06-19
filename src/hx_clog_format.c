@@ -46,14 +46,25 @@ static const char* basename_of(const char* path) {
     return base;
 }
 
-/* Small bounded appender. Tracks position; never overflows. */
+/* Small bounded appender. Writes never overflow the buffer, but `needed`
+ * keeps counting past the capacity so the caller learns the full length the
+ * line requires (snprintf semantics) and can grow + reformat exactly once.
+ * `needed` saturates at UINT_MAX so a pathological line cannot wrap it. */
 typedef struct {
     char* buf;
-    unsigned int cap;   /* total capacity including space for NUL */
-    unsigned int pos;
+    unsigned int cap;    /* total capacity including space for NUL */
+    unsigned int pos;    /* bytes actually written (always < cap) */
+    unsigned int needed; /* bytes that would be written if cap were unbounded */
 } appender_t;
 
+static void ap_bump(appender_t* a) {
+    if (a->needed != 0xFFFFFFFFu) {
+        a->needed++;
+    }
+}
+
 static void ap_char(appender_t* a, char c) {
+    ap_bump(a);
     if (a->pos + 1 < a->cap) {
         a->buf[a->pos++] = c;
     }
@@ -63,8 +74,12 @@ static void ap_str(appender_t* a, const char* s) {
     if (!s) {
         return;
     }
-    while (*s && a->pos + 1 < a->cap) {
-        a->buf[a->pos++] = *s++;
+    while (*s) {
+        ap_bump(a);
+        if (a->pos + 1 < a->cap) {
+            a->buf[a->pos++] = *s;
+        }
+        ++s;
     }
 }
 
@@ -73,8 +88,11 @@ static void ap_strn(appender_t* a, const char* s, unsigned int n) {
     if (!s) {
         return;
     }
-    for (i = 0; i < n && a->pos + 1 < a->cap; ++i) {
-        a->buf[a->pos++] = s[i];
+    for (i = 0; i < n; ++i) {
+        ap_bump(a);
+        if (a->pos + 1 < a->cap) {
+            a->buf[a->pos++] = s[i];
+        }
     }
 }
 
@@ -143,6 +161,7 @@ unsigned int hx_format_record(const char* pattern,
     a.buf = out;
     a.cap = out_size;
     a.pos = 0;
+    a.needed = 0;
 
     if (!pattern) {
         pattern = "%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n";
@@ -193,7 +212,9 @@ unsigned int hx_format_record(const char* pattern,
     }
 
     a.buf[a.pos] = '\0';
-    return a.pos;
+    /* return the full required length (may exceed pos) so the caller can grow
+     * the buffer to fit patterns that repeat %v/%x/%F many times */
+    return a.needed;
 }
 
 static void ap_json_escaped(appender_t* a, const char* s, unsigned int n) {
@@ -237,6 +258,7 @@ unsigned int hx_format_json_record(const hx_clog_record_t* rec,
     a.buf = out;
     a.cap = out_size;
     a.pos = 0;
+    a.needed = 0;
 
     hx_localtime((time_t)rec->timestamp_sec, &tmv);
 
@@ -279,5 +301,5 @@ unsigned int hx_format_json_record(const hx_clog_record_t* rec,
     ap_str(&a, "\"}\n");
 
     a.buf[a.pos] = '\0';
-    return a.pos;
+    return a.needed;
 }

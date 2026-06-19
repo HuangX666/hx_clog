@@ -128,7 +128,41 @@ typedef struct {
     int* compressed;
     int count;
     int cap;
+    int oom;             /* set when a grow allocation failed */
 } collect_ctx;
+
+/* Grow the four parallel arrays in `c` to double capacity. Uses explicit
+ * malloc+copy+free rather than realloc: with a user allocator hx_clog__realloc
+ * frees the old block even on failure, which would dangle these pointers.
+ * On failure leaves the existing arrays intact and sets c->oom. */
+static void collect_grow(collect_ctx* c) {
+    int nc = c->cap * 2;
+    char (*nn)[256] = (char (*)[256])hx_clog__malloc((size_t)nc * 256);
+    long long* nm = (long long*)hx_clog__malloc((size_t)nc * sizeof(long long));
+    long long* nk = (long long*)hx_clog__malloc((size_t)nc * sizeof(long long));
+    int* np = (int*)hx_clog__malloc((size_t)nc * sizeof(int));
+    if (!nn || !nm || !nk || !np) {
+        hx_clog__free(nn);
+        hx_clog__free(nm);
+        hx_clog__free(nk);
+        hx_clog__free(np);
+        c->oom = 1;
+        return;
+    }
+    memcpy(nn, c->names, (size_t)c->cap * 256);
+    memcpy(nm, c->mtimes, (size_t)c->cap * sizeof(long long));
+    memcpy(nk, c->keys, (size_t)c->cap * sizeof(long long));
+    memcpy(np, c->compressed, (size_t)c->cap * sizeof(int));
+    hx_clog__free(c->names);
+    hx_clog__free(c->mtimes);
+    hx_clog__free(c->keys);
+    hx_clog__free(c->compressed);
+    c->names = nn;
+    c->mtimes = nm;
+    c->keys = nk;
+    c->compressed = np;
+    c->cap = nc;
+}
 
 /* Derive a monotonic age key from an archive file name of the form
  * "<stem>.YYYY-MM-DD.<index>[.ext][.gz]". The embedded date + index is the
@@ -156,46 +190,67 @@ static int has_prefix(const char* s, const char* prefix) {
     return 1;
 }
 
-static int has_suffix(const char* s, const char* suffix) {
-    size_t ls = strlen(s), lsuf = strlen(suffix);
-    if (lsuf == 0) {
-        return 1;
-    }
-    if (lsuf > ls) {
-        return 0;
-    }
-    return strcmp(s + (ls - lsuf), suffix) == 0;
-}
-
-static int archive_suffix_match(const char* fname, const char* ext, int* compressed) {
-    char extdot[66];
-    char extgz[70];
+/* Strict archive-name recognizer. A file is a rotation backup only if its
+ * whole name is exactly "<prefix>YYYY-MM-DD.<index>[.<ext>][.gz]", where
+ * <prefix> is "<stem>." and <index> is a non-negative integer. Matching only
+ * the prefix and a trailing ".<ext>" (as an earlier version did) wrongly
+ * classified ordinary user files such as "audit.notes.log" as backups and
+ * deleted/compressed them — a data-loss bug. Anything that does not parse
+ * exactly is left untouched.
+ *
+ * `prefix` is "<stem>." (with the trailing dot). Sets *compressed to 1 when the
+ * name ends in ".gz". */
+static int archive_name_match(const char* fname, const char* prefix,
+                              const char* ext, int* compressed) {
+    size_t plen = strlen(prefix);
+    const char* p;
+    int y = 0, mo = 0, d = 0, idx = -1, consumed = 0;
 
     if (compressed) {
         *compressed = 0;
     }
+    if (strncmp(fname, prefix, plen) != 0) {
+        return 0;
+    }
+    p = fname + plen;
 
+    /* require "YYYY-MM-DD.<index>" immediately after the prefix */
+    if (sscanf(p, "%4d-%2d-%2d.%d%n", &y, &mo, &d, &idx, &consumed) != 4 ||
+        consumed <= 0 || idx < 0 ||
+        mo < 1 || mo > 12 || d < 1 || d > 31) {
+        return 0;
+    }
+    p += consumed;
+
+    /* whatever follows the index must be exactly the extension (optionally
+     * followed by ".gz"), with no extra characters */
     if (!ext || !ext[0]) {
-        if (has_suffix(fname, ".gz")) {
+        if (p[0] == '\0') {
+            return 1;
+        }
+        if (strcmp(p, ".gz") == 0) {
             if (compressed) {
                 *compressed = 1;
             }
+            return 1;
         }
-        return 1;
-    }
-
-    snprintf(extdot, sizeof(extdot), ".%s", ext);
-    snprintf(extgz, sizeof(extgz), ".%s.gz", ext);
-    if (has_suffix(fname, extdot)) {
-        return 1;
-    }
-    if (has_suffix(fname, extgz)) {
-        if (compressed) {
-            *compressed = 1;
+        return 0;
+    } else {
+        char want[66];
+        char wantgz[70];
+        snprintf(want, sizeof(want), ".%s", ext);
+        snprintf(wantgz, sizeof(wantgz), ".%s.gz", ext);
+        if (strcmp(p, want) == 0) {
+            return 1;
         }
-        return 1;
+        if (strcmp(p, wantgz) == 0) {
+            if (compressed) {
+                *compressed = 1;
+            }
+            return 1;
+        }
+        return 0;
     }
-    return 0;
 }
 
 static void collect_cb(const char* fname, void* user) {
@@ -203,17 +258,24 @@ static void collect_cb(const char* fname, void* user) {
     char full[HX_CLOG_PATH_MAX];
     int is_compressed = 0;
 
+    if (c->oom) {
+        return; /* a prior grow failed; stop collecting */
+    }
     if (strcmp(fname, c->active) == 0) {
         return; /* skip active file */
     }
-    if (!has_prefix(fname, c->prefix)) {
-        return;
-    }
-    if (!archive_suffix_match(fname, c->ext, &is_compressed)) {
+    /* strict match: only real "<stem>.YYYY-MM-DD.<index>[.ext][.gz]" backups,
+     * never arbitrary user files that merely share the stem/extension */
+    if (!archive_name_match(fname, c->prefix, c->ext, &is_compressed)) {
         return;
     }
     if (c->count >= c->cap) {
-        return;
+        /* grow instead of silently ignoring extra backups, so retention limits
+         * still hold for long-running processes with many archives */
+        collect_grow(c);
+        if (c->oom) {
+            return;
+        }
     }
     snprintf(full, sizeof(full), "%s/%s", c->dir, fname);
     strncpy(c->names[c->count], fname, 255);
@@ -340,7 +402,9 @@ static void index_cb(const char* fname, void* user) {
     }
 }
 
-#define HX_ROTATE_MAX_BACKUPS 512
+/* Initial candidate capacity; collect_grow() doubles it on demand so retention
+ * is enforced no matter how many archives exist. */
+#define HX_ROTATE_INIT_BACKUPS 512
 
 void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     /* heap-allocated working set (~140 KB): a static buffer would not be
@@ -355,15 +419,18 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     char stem[256], ext[64];
     int i, j;
 
-    names = (char (*)[256])hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * 256);
-    mtimes = (long long*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(long long));
-    keys = (long long*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(long long));
-    compressed = (int*)hx_clog__malloc(HX_ROTATE_MAX_BACKUPS * sizeof(int));
+    names = (char (*)[256])hx_clog__malloc(HX_ROTATE_INIT_BACKUPS * 256);
+    mtimes = (long long*)hx_clog__malloc(HX_ROTATE_INIT_BACKUPS * sizeof(long long));
+    keys = (long long*)hx_clog__malloc(HX_ROTATE_INIT_BACKUPS * sizeof(long long));
+    compressed = (int*)hx_clog__malloc(HX_ROTATE_INIT_BACKUPS * sizeof(int));
     if (!names || !mtimes || !keys || !compressed) {
         hx_clog__free(names);
         hx_clog__free(mtimes);
         hx_clog__free(keys);
         hx_clog__free(compressed);
+        hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                             "rotation cleanup skipped: out of memory allocating "
+                             "the backup working set; old backups may accumulate");
         return; /* skip cleanup this round; rotation itself already happened */
     }
 
@@ -378,8 +445,20 @@ void hx_rotate_cleanup(struct hx_file_sink_impl* fs) {
     c.mtimes = mtimes;
     c.keys = keys;
     c.compressed = compressed;
-    c.cap = HX_ROTATE_MAX_BACKUPS;
+    c.cap = HX_ROTATE_INIT_BACKUPS;
     list_dir(fs->active_dir, collect_cb, &c);
+
+    /* collect_grow() may have reallocated the arrays; re-sync the locals so the
+     * sort/cleanup below (and the frees at the end) use the live buffers. */
+    names = c.names;
+    mtimes = c.mtimes;
+    keys = c.keys;
+    compressed = c.compressed;
+    if (c.oom) {
+        hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                             "rotation cleanup: out of memory enumerating backups;"
+                             " some old backups may not be cleaned this round");
+    }
 
     /* sort ascending (oldest first) by the parsed date+index key, which is
      * exact per rotation; the file mtime has only 1-second resolution and
