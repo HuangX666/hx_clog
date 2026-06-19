@@ -725,12 +725,36 @@ static void core_set_mode(hx_clog_mode_t m) {
 typedef struct {
     int gen;                     /* 0 = never filled */
     char pattern[512];
+    char logger_name[128];       /* snapshot of the default logger name */
     hx_clog_format_mode_t mode;
     hx_clog_formatter_t formatter;
     void* formatter_user_data;
 } tls_format_cache_t;
 
 static HX_THREAD_LOCAL tls_format_cache_t g_tls_fmt;
+
+/* Refresh the per-thread format snapshot when the global format generation
+ * changed. Reads the global pattern / formatter / default logger name under
+ * sink_lock so the hot path can use the cached copies without a per-log lock
+ * and without racing reconfigure(), which rewrites those fields under the same
+ * lock and bumps format_gen. */
+static void fmt_cache_refresh(void) {
+    int gen = hx_atomic_load_level(&g_core.format_gen);
+    if (gen == g_tls_fmt.gen) {
+        return;
+    }
+    hx_mutex_lock(&g_core.sink_lock);
+    strncpy(g_tls_fmt.pattern, g_core.pattern, sizeof(g_tls_fmt.pattern) - 1);
+    g_tls_fmt.pattern[sizeof(g_tls_fmt.pattern) - 1] = '\0';
+    strncpy(g_tls_fmt.logger_name, g_core.default_logger.name,
+            sizeof(g_tls_fmt.logger_name) - 1);
+    g_tls_fmt.logger_name[sizeof(g_tls_fmt.logger_name) - 1] = '\0';
+    g_tls_fmt.mode = g_core.format_mode;
+    g_tls_fmt.formatter = g_core.formatter;
+    g_tls_fmt.formatter_user_data = g_core.formatter_user_data;
+    g_tls_fmt.gen = hx_atomic_load_level(&g_core.format_gen);
+    hx_mutex_unlock(&g_core.sink_lock);
+}
 
 /* Internal error handler (cold path). */
 static hx_mutex_t g_err_lock;
@@ -1894,21 +1918,10 @@ static void core_dispatch_record(hx_clog_record_t* rec) {
     int have_default_targets = 1;
     int counted = 0;
     int i;
-    int gen;
 
     /* refresh the per-thread snapshot of the global format settings only
      * when they changed; the steady-state hot path takes no lock here */
-    gen = hx_atomic_load_level(&g_core.format_gen);
-    if (gen != g_tls_fmt.gen) {
-        hx_mutex_lock(&g_core.sink_lock);
-        strncpy(g_tls_fmt.pattern, g_core.pattern, sizeof(g_tls_fmt.pattern) - 1);
-        g_tls_fmt.pattern[sizeof(g_tls_fmt.pattern) - 1] = '\0';
-        g_tls_fmt.mode = g_core.format_mode;
-        g_tls_fmt.formatter = g_core.formatter;
-        g_tls_fmt.formatter_user_data = g_core.formatter_user_data;
-        g_tls_fmt.gen = hx_atomic_load_level(&g_core.format_gen);
-        hx_mutex_unlock(&g_core.sink_lock);
-    }
+    fmt_cache_refresh();
 
     format_with_retry(rec, g_tls_fmt.pattern, g_tls_fmt.mode,
                       g_tls_fmt.formatter, g_tls_fmt.formatter_user_data,
@@ -1995,10 +2008,11 @@ static void dup_emit_summary(hx_clog_level_t level, const char* logger_name,
     if (n < 0) {
         return;
     }
+    fmt_cache_refresh();
     memset(&rec, 0, sizeof(rec));
     rec.level = level;
     rec.logger_name = logger_name && logger_name[0]
-                          ? logger_name : g_core.default_logger.name;
+                          ? logger_name : g_tls_fmt.logger_name;
     rec.file = "hx_clog";
     rec.line = 0;
     rec.func = "dup";
@@ -2149,6 +2163,15 @@ static void core_writev(const char* logger_name,
     }
     va_end(args_copy);
 
+    /* Resolve the effective logger name. For the default logger (caller passes
+     * NULL/empty) read it from the per-thread cache, filled under sink_lock by
+     * fmt_cache_refresh(), rather than racing a concurrent reconfigure() that
+     * rewrites g_core.default_logger.name. */
+    fmt_cache_refresh();
+    if (!(logger_name && logger_name[0])) {
+        logger_name = g_tls_fmt.logger_name;
+    }
+
     /* fold consecutive duplicates when suppression is enabled */
     if (g_dup.enabled &&
         dup_check_and_update(level, file, line, logger_name, msg, msg_len)) {
@@ -2160,7 +2183,7 @@ static void core_writev(const char* logger_name,
 
     memset(&rec, 0, sizeof(rec));
     rec.level = level;
-    rec.logger_name = logger_name && logger_name[0] ? logger_name : g_core.default_logger.name;
+    rec.logger_name = logger_name;
     rec.file = file;
     rec.line = line;
     rec.func = func;
@@ -2184,7 +2207,10 @@ static void core_writev(const char* logger_name,
 void hx_clog_writev(hx_clog_level_t level,
                     const char* file, int line, const char* func,
                     const char* fmt, va_list args) {
-    core_writev(g_core.default_logger.name, &g_core.default_logger.level,
+    /* pass NULL: core_writev resolves the default logger name from the
+     * per-thread cache, avoiding a lock-free read of g_core.default_logger.name
+     * that would race a concurrent reconfigure() */
+    core_writev(NULL, &g_core.default_logger.level,
                 level, file, line, func, fmt, args);
 }
 
