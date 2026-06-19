@@ -114,6 +114,11 @@ hx_clog_context_remove("request_id");
 hx_clog_context_clear();
 ```
 
+Limits (per thread): up to **16** entries; keys are truncated to **63** bytes and
+values to **127** bytes. Calling `hx_clog_context_put` again with the same key
+updates that entry in place — keys are matched by their first 63 bytes, so two
+keys sharing a 63-byte prefix map to the same entry.
+
 Pattern mode supports `%c` for logger/category and `%x` for context.
 
 ## Formatting

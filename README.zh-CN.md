@@ -576,6 +576,9 @@ hx_clog_context_put("module", "network");
 HX_LOG_INFO("connected");          /* %x -> "module=network" */
 ```
 
+context 每个线程最多 16 项；key 截断到 63 字节，value 截断到 127 字节。对同一个
+key 再次 `put` 会原地更新（key 以前 63 字节为准匹配）。
+
 #### 示例
 
 ```text

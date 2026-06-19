@@ -579,6 +579,10 @@ hx_clog_context_put("module", "network");
 HX_LOG_INFO("connected");          /* %x -> "module=network" */
 ```
 
+The context holds up to 16 entries per thread; keys are truncated to 63 bytes
+and values to 127 bytes. Re-putting the same key updates it in place (keys are
+matched by their first 63 bytes).
+
 #### Examples
 
 ```text
