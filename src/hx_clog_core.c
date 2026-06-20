@@ -1866,6 +1866,20 @@ int hx_clog_add_apple_log_sink(const char* subsystem, hx_clog_sink_id_t* out_id)
     return add_system_sink_runtime(hx_sink_apple_log_create(subsystem), out_id);
 }
 
+int hx_clog_add_network_sink(hx_clog_net_protocol_t protocol, const char* host,
+                             unsigned short port, hx_clog_sink_id_t* out_id) {
+    if (!host || !host[0] || port == 0) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+#if defined(HX_CLOG_ENABLE_NET)
+    return add_system_sink_runtime(
+        hx_sink_network_create((int)protocol, host, port), out_id);
+#else
+    (void)protocol;
+    return HX_CLOG_ERR_PLATFORM; /* network support compiled out */
+#endif
+}
+
 int hx_clog_remove_sink(hx_clog_sink_id_t id) {
     int i;
     ensure_once();

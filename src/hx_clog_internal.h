@@ -195,7 +195,8 @@ typedef enum hx_sink_kind {
     HX_SINK_KIND_SYSLOG,
     HX_SINK_KIND_EVENT_LOG,
     HX_SINK_KIND_ANDROID_LOG,
-    HX_SINK_KIND_APPLE_LOG
+    HX_SINK_KIND_APPLE_LOG,
+    HX_SINK_KIND_NETWORK
 } hx_sink_kind_t;
 
 #define HX_SINK_PATTERN_MAX 256
@@ -230,6 +231,11 @@ hx_clog_sink_t* hx_sink_syslog_create(const char* ident);
 hx_clog_sink_t* hx_sink_event_log_create(const char* source);
 hx_clog_sink_t* hx_sink_android_log_create(const char* tag);
 hx_clog_sink_t* hx_sink_apple_log_create(const char* subsystem);
+#if defined(HX_CLOG_ENABLE_NET)
+/* proto: 0 = TCP, 1 = UDP. Lazy-connects on first write; never blocks create. */
+hx_clog_sink_t* hx_sink_network_create(int proto, const char* host,
+                                       unsigned short port);
+#endif
 
 void hx_sink_write(hx_clog_sink_t* s, hx_clog_level_t level,
                    const char* data, unsigned int size);

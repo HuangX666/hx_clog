@@ -356,6 +356,21 @@ HX_CLOG_API int hx_clog_add_android_log_sink(const char* tag,
                                              hx_clog_sink_id_t* out_id);
 HX_CLOG_API int hx_clog_add_apple_log_sink(const char* subsystem,
                                            hx_clog_sink_id_t* out_id);
+
+/* Network sink: send each formatted line to host:port. TCP keeps a connection
+ * and reconnects (rate-limited) after failures; UDP is fire-and-forget. The
+ * connection is established lazily on the first write, so this never blocks and
+ * a down collector does not fail. Lines are dropped while the link is down
+ * (upstream async queue does the buffering). Returns HX_CLOG_ERR_PLATFORM when
+ * built without HX_CLOG_ENABLE_NET. */
+typedef enum hx_clog_net_protocol {
+    HX_CLOG_NET_TCP = 0,
+    HX_CLOG_NET_UDP
+} hx_clog_net_protocol_t;
+HX_CLOG_API int hx_clog_add_network_sink(hx_clog_net_protocol_t protocol,
+                                         const char* host, unsigned short port,
+                                         hx_clog_sink_id_t* out_id);
+
 HX_CLOG_API int hx_clog_remove_sink(hx_clog_sink_id_t id);
 HX_CLOG_API int hx_clog_set_sink_level(hx_clog_sink_id_t id,
                                        hx_clog_level_t min_level);

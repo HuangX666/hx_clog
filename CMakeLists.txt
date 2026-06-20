@@ -27,6 +27,7 @@ option(HX_CLOG_BUILD_TESTS    "Build tests" ON)
 option(HX_CLOG_ENABLE_CPP11   "Enable C++11 wrapper" ON)
 option(HX_CLOG_ENABLE_ASYNC   "Enable async logging" ON)
 option(HX_CLOG_ENABLE_CRASH   "Enable crash handler" ON)
+option(HX_CLOG_ENABLE_NET     "Enable TCP/UDP network sink" ON)
 option(HX_CLOG_ENABLE_COLOR   "Enable colored console output" ON)
 option(HX_CLOG_ENABLE_SYSLOG  "Enable syslog sink on Unix/macOS" OFF)
 option(HX_CLOG_ENABLE_MINIDUMP "Enable minidump on Windows" ON)
@@ -61,6 +62,10 @@ endif()
 
 if(HX_CLOG_ENABLE_CRASH)
     list(APPEND HX_CLOG_SOURCES src/hx_clog_crash.c)
+endif()
+
+if(HX_CLOG_ENABLE_NET)
+    list(APPEND HX_CLOG_SOURCES src/hx_clog_net.c)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -108,6 +113,13 @@ endif()
 
 if(HX_CLOG_ENABLE_CRASH)
     target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_CRASH=1)
+endif()
+
+if(HX_CLOG_ENABLE_NET)
+    target_compile_definitions(hx_clog PUBLIC HX_CLOG_ENABLE_NET=1)
+    if(WIN32)
+        target_link_libraries(hx_clog PRIVATE ws2_32)
+    endif()
 endif()
 
 # HX_CLOG_USES_ZLIB feeds the exported package config and the pkg-config
