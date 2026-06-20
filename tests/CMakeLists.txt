@@ -6,6 +6,14 @@ add_executable(test_macros test_macros.c)
 target_link_libraries(test_macros PRIVATE hx_clog::hx_clog)
 add_test(NAME test_macros COMMAND test_macros)
 
+add_executable(test_config_file test_config_file.c)
+target_link_libraries(test_config_file PRIVATE hx_clog::hx_clog)
+add_test(NAME test_config_file COMMAND test_config_file)
+
+add_executable(test_logger_registry test_logger_registry.c)
+target_link_libraries(test_logger_registry PRIVATE hx_clog::hx_clog)
+add_test(NAME test_logger_registry COMMAND test_logger_registry)
+
 add_executable(test_rotate test_rotate.c)
 target_link_libraries(test_rotate PRIVATE hx_clog::hx_clog)
 add_test(NAME test_rotate COMMAND test_rotate)
@@ -62,8 +70,9 @@ endif()
 # them (there is no rpath equivalent), so copy it after each build.
 if(WIN32 AND HX_CLOG_BUILD_SHARED)
     set(_hx_test_targets
-        test_format test_macros test_rotate test_largeline test_features
-        test_rotate_time test_utf8path test_date_subdir test_crash)
+        test_format test_macros test_config_file test_logger_registry
+        test_rotate test_largeline test_features test_rotate_time
+        test_utf8path test_date_subdir test_crash)
     if(HX_CLOG_ENABLE_ASYNC)
         list(APPEND _hx_test_targets test_async test_audit_fixes)
     endif()

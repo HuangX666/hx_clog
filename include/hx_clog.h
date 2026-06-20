@@ -192,6 +192,10 @@ HX_CLOG_API void hx_clog_config_default(hx_clog_config_t* config);
  * Lifecycle
  * ------------------------------------------------------------------------- */
 HX_CLOG_API int  hx_clog_init(const hx_clog_config_t* config);
+/* Initialize from an INI file (a `[hx_clog]` section of key=value lines; keys
+ * mirror the config fields, e.g. level=debug, dir=./logs, max_file_size=10M,
+ * mode=async). Missing keys keep their defaults. '#' and ';' start comments. */
+HX_CLOG_API int  hx_clog_init_from_file(const char* path);
 HX_CLOG_API void hx_clog_shutdown(void);
 HX_CLOG_API void hx_clog_flush(void);
 HX_CLOG_API int  hx_clog_is_initialized(void);
@@ -275,6 +279,22 @@ HX_CLOG_API int  hx_clog_logger_set_level(hx_clog_logger_t* logger,
 HX_CLOG_API hx_clog_level_t hx_clog_logger_get_level(
     const hx_clog_logger_t* logger);
 HX_CLOG_API const char* hx_clog_logger_name(const hx_clog_logger_t* logger);
+
+/* Registry + dotted-name hierarchy. hx_clog_logger_get returns the existing
+ * logger of that name or creates+registers one (never lost — no pointer to
+ * track). A new "a.b.c" inherits the level of its nearest registered ancestor
+ * ("a.b", then "a"), else the global level. hx_clog_logger_find returns NULL if
+ * absent. hx_clog_set_level_for_prefix sets the prefix logger and all current
+ * descendants ("net" affects "net", "net.tcp", ...) and creates the prefix
+ * logger so later descendants inherit too. Registry loggers live until
+ * hx_clog_logger_drop_all() or process exit; do not pass them to
+ * hx_clog_logger_destroy(). */
+HX_CLOG_API hx_clog_logger_t* hx_clog_logger_get(const char* name);
+HX_CLOG_API hx_clog_logger_t* hx_clog_logger_find(const char* name);
+HX_CLOG_API unsigned int      hx_clog_logger_count(void);
+HX_CLOG_API int  hx_clog_set_level_for_prefix(const char* prefix,
+                                              hx_clog_level_t level);
+HX_CLOG_API void hx_clog_logger_drop_all(void);
 HX_CLOG_API void hx_clog_logger_write(
     hx_clog_logger_t* logger,
     hx_clog_level_t level,

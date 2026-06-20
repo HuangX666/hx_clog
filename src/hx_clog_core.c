@@ -611,6 +611,8 @@ struct hx_clog_logger {
     char name[128];
     volatile int level;
     int is_default;
+    int registered;               /* 1 when owned by the registry */
+    struct hx_clog_logger* next;  /* registry singly-linked list */
 };
 
 static int context_key_index(const char* key) {
@@ -716,6 +718,11 @@ typedef struct {
 
     hx_mutex_t sink_lock;        /* guards sink writes in sync mode + sink list */
     hx_mutex_t init_lock;        /* serializes init/shutdown/reconfigure */
+
+    /* named-logger registry (hx_clog_logger_get/find + dotted-name hierarchy) */
+    hx_mutex_t logger_lock;
+    struct hx_clog_logger* logger_head;
+    int logger_count;
 
     /* stats */
     hx_mutex_t stats_lock;
@@ -941,6 +948,165 @@ static void apply_env_overrides(hx_clog_config_t* cfg) {
     }
 }
 
+/* ---- INI config file support (B3) ---- */
+
+static char* ini_trim(char* s) {
+    char* e;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') {
+        s++;
+    }
+    e = s + strlen(s);
+    while (e > s &&
+           (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) {
+        *--e = '\0';
+    }
+    return s;
+}
+
+static int ini_bool(const char* v) {
+    return (ieq(v, "1") || ieq(v, "true") || ieq(v, "yes") || ieq(v, "on")) ? 1 : 0;
+}
+
+/* "10", "64K", "10M", "2G" (K/M/G are binary multiples) -> bytes */
+static unsigned long long ini_size(const char* v) {
+    unsigned long long n = 0;
+    while (*v >= '0' && *v <= '9') {
+        n = n * 10 + (unsigned long long)(*v - '0');
+        v++;
+    }
+    if (*v == 'k' || *v == 'K') n *= 1024ULL;
+    else if (*v == 'm' || *v == 'M') n *= 1024ULL * 1024ULL;
+    else if (*v == 'g' || *v == 'G') n *= 1024ULL * 1024ULL * 1024ULL;
+    return n;
+}
+
+/* Apply one key=value to cfg. String values are copied into the caller's
+ * buffers (which must outlive the subsequent hx_clog_init call). */
+static void ini_apply_kv(hx_clog_config_t* cfg, const char* k, const char* v,
+                         char* dir, size_t dir_n, char* file, size_t file_n,
+                         char* logger, size_t logger_n,
+                         char* pat, size_t pat_n) {
+    if (ieq(k, "level")) {
+        cfg->level = hx_clog_level_from_name(v);
+    } else if (ieq(k, "dir") || ieq(k, "log_dir")) {
+        strncpy(dir, v, dir_n - 1); dir[dir_n - 1] = '\0'; cfg->log_dir = dir;
+    } else if (ieq(k, "file") || ieq(k, "file_name")) {
+        strncpy(file, v, file_n - 1); file[file_n - 1] = '\0'; cfg->file_name = file;
+    } else if (ieq(k, "logger") || ieq(k, "logger_name")) {
+        strncpy(logger, v, logger_n - 1); logger[logger_n - 1] = '\0';
+        cfg->logger_name = logger;
+    } else if (ieq(k, "pattern")) {
+        strncpy(pat, v, pat_n - 1); pat[pat_n - 1] = '\0'; cfg->pattern = pat;
+    } else if (ieq(k, "mode")) {
+        cfg->mode = ieq(v, "async") ? HX_CLOG_MODE_ASYNC : HX_CLOG_MODE_SYNC;
+    } else if (ieq(k, "console") || ieq(k, "enable_console")) {
+        cfg->enable_console = ini_bool(v);
+    } else if (ieq(k, "file_output") || ieq(k, "enable_file")) {
+        cfg->enable_file = ini_bool(v);
+    } else if (ieq(k, "color") || ieq(k, "enable_color")) {
+        cfg->enable_color = ini_bool(v);
+    } else if (ieq(k, "format") || ieq(k, "format_mode")) {
+        cfg->format_mode = ieq(v, "json") ? HX_CLOG_FORMAT_JSON
+                                          : HX_CLOG_FORMAT_PATTERN;
+    } else if (ieq(k, "max_file_size")) {
+        cfg->max_file_size = ini_size(v);
+    } else if (ieq(k, "max_backup_files")) {
+        cfg->max_backup_files = atoi(v);
+    } else if (ieq(k, "max_backup_days")) {
+        cfg->max_backup_days = atoi(v);
+    } else if (ieq(k, "max_compressed_files")) {
+        cfg->max_compressed_files = atoi(v);
+    } else if (ieq(k, "rotate_daily")) {
+        cfg->rotate_daily = ini_bool(v);
+    } else if (ieq(k, "rotate_interval_seconds")) {
+        cfg->rotate_interval_seconds = (unsigned int)atoi(v);
+    } else if (ieq(k, "rotate_on_startup")) {
+        cfg->rotate_on_startup = ini_bool(v);
+    } else if (ieq(k, "rotate_align")) {
+        cfg->rotate_align = ini_bool(v);
+    } else if (ieq(k, "date_subdir")) {
+        cfg->date_subdir = ini_bool(v);
+    } else if (ieq(k, "async_queue_size")) {
+        cfg->async_queue_size = (unsigned int)atoi(v);
+    } else if (ieq(k, "async_batch_size")) {
+        cfg->async_batch_size = (unsigned int)atoi(v);
+    } else if (ieq(k, "flush_interval_ms")) {
+        cfg->flush_interval_ms = (unsigned int)atoi(v);
+    } else if (ieq(k, "crash") || ieq(k, "enable_crash_handler")) {
+        cfg->enable_crash_handler = ini_bool(v);
+    } else if (ieq(k, "rotate_policy")) {
+        if (ieq(v, "size")) cfg->rotate_policy = HX_CLOG_ROTATE_BY_SIZE;
+        else if (ieq(v, "time")) cfg->rotate_policy = HX_CLOG_ROTATE_BY_TIME;
+        else if (ieq(v, "size_and_time") || ieq(v, "both"))
+            cfg->rotate_policy = HX_CLOG_ROTATE_BY_SIZE_AND_TIME;
+        else cfg->rotate_policy = HX_CLOG_ROTATE_NONE;
+    } else if (ieq(k, "overflow") || ieq(k, "overflow_policy")) {
+        if (ieq(v, "drop_new")) cfg->overflow_policy = HX_CLOG_OVERFLOW_DROP_NEW;
+        else if (ieq(v, "drop_old")) cfg->overflow_policy = HX_CLOG_OVERFLOW_DROP_OLD;
+        else cfg->overflow_policy = HX_CLOG_OVERFLOW_BLOCK;
+    }
+    /* unknown keys are ignored on purpose (forward compatibility) */
+}
+
+int hx_clog_init_from_file(const char* path) {
+    hx_clog_config_t cfg;
+    char dir[HX_CLOG_PATH_MAX], file[256], logger[128], pat[512];
+    char line[1200];
+    FILE* fp;
+    int in_section = 1; /* keys before any [section] are accepted */
+
+    if (!path || !path[0]) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    hx_clog_config_default(&cfg);
+    /* seed string buffers with the defaults so keys absent from the file keep
+     * them; the buffers must outlive the hx_clog_init() call below */
+    strncpy(dir, cfg.log_dir ? cfg.log_dir : "./logs", sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0'; cfg.log_dir = dir;
+    strncpy(file, cfg.file_name ? cfg.file_name : "app.log", sizeof(file) - 1);
+    file[sizeof(file) - 1] = '\0'; cfg.file_name = file;
+    strncpy(logger, cfg.logger_name ? cfg.logger_name : "hx_clog", sizeof(logger) - 1);
+    logger[sizeof(logger) - 1] = '\0'; cfg.logger_name = logger;
+    if (cfg.pattern) {
+        strncpy(pat, cfg.pattern, sizeof(pat) - 1);
+        pat[sizeof(pat) - 1] = '\0'; cfg.pattern = pat;
+    } else {
+        pat[0] = '\0';
+    }
+
+    fp = hx_fopen(path, "r");
+    if (!fp) {
+        return HX_CLOG_ERR_OPEN_FILE_FAILED;
+    }
+    while (fgets(line, sizeof(line), fp)) {
+        char* s = ini_trim(line);
+        char* eq;
+        if (!*s || *s == '#' || *s == ';') {
+            continue;
+        }
+        if (*s == '[') {
+            char* end = strchr(s, ']');
+            if (end) *end = '\0';
+            in_section = (ieq(s + 1, "hx_clog") || ieq(s + 1, "hxclog") ||
+                          s[1] == '\0') ? 1 : 0;
+            continue;
+        }
+        if (!in_section) {
+            continue;
+        }
+        eq = strchr(s, '=');
+        if (!eq) {
+            continue;
+        }
+        *eq = '\0';
+        ini_apply_kv(&cfg, ini_trim(s), ini_trim(eq + 1),
+                     dir, sizeof(dir), file, sizeof(file),
+                     logger, sizeof(logger), pat, sizeof(pat));
+    }
+    fclose(fp);
+    return hx_clog_init(&cfg);
+}
+
 /* =========================================================================
  * Emit path
  * ========================================================================= */
@@ -1047,6 +1213,7 @@ static void hx_atfork_prepare(void) {
     hx_mutex_lock(&g_core.init_lock);
     hx_mutex_lock(&g_core.sink_lock);
     hx_mutex_lock(&g_core.stats_lock);
+    hx_mutex_lock(&g_core.logger_lock);
 #if defined(HX_CLOG_ENABLE_ASYNC)
     hx_async_atfork_lock();
 #endif
@@ -1068,6 +1235,7 @@ static void hx_atfork_release(void) {
 #if defined(HX_CLOG_ENABLE_ASYNC)
     hx_async_atfork_unlock();
 #endif
+    hx_mutex_unlock(&g_core.logger_lock);
     hx_mutex_unlock(&g_core.stats_lock);
     hx_mutex_unlock(&g_core.sink_lock);
     hx_mutex_unlock(&g_core.init_lock);
@@ -1083,6 +1251,7 @@ static void core_once_init(void) {
     hx_mutex_init_recursive(&g_core.sink_lock);
     hx_mutex_init(&g_core.stats_lock);
     hx_mutex_init(&g_core.init_lock);
+    hx_mutex_init(&g_core.logger_lock);
     hx_mutex_init(&g_err_lock);
     memset(&g_dup, 0, sizeof(g_dup));
     hx_mutex_init(&g_dup.lock);
@@ -1848,6 +2017,7 @@ void hx_clog_after_fork_child(void) {
     hx_mutex_init_recursive(&g_core.sink_lock);
     hx_mutex_init(&g_core.stats_lock);
     hx_mutex_init(&g_core.init_lock);
+    hx_mutex_init(&g_core.logger_lock);
     hx_mutex_init(&g_err_lock);
     hx_mutex_init(&g_dup.lock);
 #if defined(HX_PLATFORM_WINDOWS) && !defined(_MSC_VER)
@@ -2367,9 +2537,132 @@ int hx_clog_logger_create(const char* name,
 }
 
 void hx_clog_logger_destroy(hx_clog_logger_t* logger) {
-    if (logger && !logger->is_default) {
+    /* registry-owned loggers (from hx_clog_logger_get) are freed by
+     * hx_clog_logger_drop_all / process exit, not here */
+    if (logger && !logger->is_default && !logger->registered) {
         hx_clog__free(logger);
     }
+}
+
+/* ---- named-logger registry + dotted-name hierarchy (B4) ---- */
+
+static struct hx_clog_logger* logger_find_locked(const char* name) {
+    struct hx_clog_logger* p;
+    for (p = g_core.logger_head; p; p = p->next) {
+        if (strcmp(p->name, name) == 0) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Level a new logger should start at: the nearest registered ancestor along the
+ * dotted name ("a.b.c" -> "a.b" -> "a"), else the global default level. */
+static int logger_inherited_level_locked(const char* name) {
+    char buf[128];
+    strncpy(buf, name, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    for (;;) {
+        struct hx_clog_logger* anc;
+        char* dot = strrchr(buf, '.');
+        if (!dot) {
+            break;
+        }
+        *dot = '\0';
+        anc = logger_find_locked(buf);
+        if (anc) {
+            return hx_atomic_load_level(&anc->level);
+        }
+    }
+    return hx_atomic_load_level(&g_core.level);
+}
+
+hx_clog_logger_t* hx_clog_logger_get(const char* name) {
+    struct hx_clog_logger* lg;
+    if (!name || !name[0]) {
+        name = "hx_clog";
+    }
+    ensure_once();
+    hx_mutex_lock(&g_core.logger_lock);
+    lg = logger_find_locked(name);
+    if (!lg) {
+        lg = (struct hx_clog_logger*)hx_clog__malloc(sizeof(*lg));
+        if (lg) {
+            int lvl = logger_inherited_level_locked(name);
+            memset(lg, 0, sizeof(*lg));
+            strncpy(lg->name, name, sizeof(lg->name) - 1);
+            lg->level = lvl;
+            lg->registered = 1;
+            lg->next = g_core.logger_head;
+            g_core.logger_head = lg;
+            g_core.logger_count++;
+        }
+    }
+    hx_mutex_unlock(&g_core.logger_lock);
+    return lg;
+}
+
+hx_clog_logger_t* hx_clog_logger_find(const char* name) {
+    struct hx_clog_logger* lg;
+    if (!name) {
+        return NULL;
+    }
+    ensure_once();
+    hx_mutex_lock(&g_core.logger_lock);
+    lg = logger_find_locked(name);
+    hx_mutex_unlock(&g_core.logger_lock);
+    return lg;
+}
+
+unsigned int hx_clog_logger_count(void) {
+    unsigned int n;
+    ensure_once();
+    hx_mutex_lock(&g_core.logger_lock);
+    n = (unsigned int)g_core.logger_count;
+    hx_mutex_unlock(&g_core.logger_lock);
+    return n;
+}
+
+int hx_clog_set_level_for_prefix(const char* prefix, hx_clog_level_t level) {
+    struct hx_clog_logger* p;
+    size_t plen;
+    if (!prefix || level < HX_CLOG_LEVEL_TRACE || level > HX_CLOG_LEVEL_OFF) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    ensure_once();
+    /* make sure the prefix logger itself exists, so descendants created *later*
+     * inherit this level via logger_inherited_level_locked() */
+    if (prefix[0]) {
+        (void)hx_clog_logger_get(prefix);
+    }
+    plen = strlen(prefix);
+    hx_mutex_lock(&g_core.logger_lock);
+    for (p = g_core.logger_head; p; p = p->next) {
+        /* the prefix logger itself and any "prefix.<...>" descendant; an empty
+         * prefix matches every registered logger */
+        if (plen == 0 ||
+            (strncmp(p->name, prefix, plen) == 0 &&
+             (p->name[plen] == '\0' || p->name[plen] == '.'))) {
+            hx_atomic_store_level(&p->level, (int)level);
+        }
+    }
+    hx_mutex_unlock(&g_core.logger_lock);
+    return HX_CLOG_OK;
+}
+
+void hx_clog_logger_drop_all(void) {
+    struct hx_clog_logger* p;
+    ensure_once();
+    hx_mutex_lock(&g_core.logger_lock);
+    p = g_core.logger_head;
+    while (p) {
+        struct hx_clog_logger* nx = p->next;
+        hx_clog__free(p);
+        p = nx;
+    }
+    g_core.logger_head = NULL;
+    g_core.logger_count = 0;
+    hx_mutex_unlock(&g_core.logger_lock);
 }
 
 int hx_clog_logger_set_level(hx_clog_logger_t* logger, hx_clog_level_t level) {
