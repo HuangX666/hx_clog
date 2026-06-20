@@ -14,10 +14,28 @@ int main(void) { printf("ALL PASS (fork: skipped on Windows)\n"); return 0; }
 #include <sys/wait.h>
 #include <signal.h>
 
+/* ThreadSanitizer cannot handle fork() in a multithreaded process: its runtime
+ * holds internal locks across fork and the child deadlocks inside TSan itself
+ * (a documented TSan limitation, not a library issue). The non-sanitized
+ * Debug/Release jobs exercise this path. Skip it under TSan. */
+#if defined(__SANITIZE_THREAD__)
+#  define HX_UNDER_TSAN 1
+#elif defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define HX_UNDER_TSAN 1
+#  endif
+#endif
+
 #define CHECK(cond) do { \
     if (!(cond)) { printf("FAIL: %s (line %d)\n", #cond, __LINE__); return 1; } \
 } while (0)
 
+#if defined(HX_UNDER_TSAN)
+int main(void) {
+    printf("ALL PASS (fork: skipped under ThreadSanitizer)\n");
+    return 0;
+}
+#else
 int main(void) {
     hx_clog_config_t cfg;
     pid_t pid;
@@ -66,5 +84,6 @@ int main(void) {
     printf("ALL PASS\n");
     return 0;
 }
+#endif /* HX_UNDER_TSAN */
 
 #endif /* _WIN32 */
