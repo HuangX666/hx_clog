@@ -2419,7 +2419,12 @@ static void core_writev(const char* logger_name,
     va_copy(args_copy, args);
     n = vsnprintf(msg_stack, sizeof(msg_stack), fmt ? fmt : "", args);
     if (n < 0) {
+        /* encoding error in the format string/args: report instead of silently
+         * dropping the line (L3) */
         va_end(args_copy);
+        hx_core_report_error(HX_CLOG_ERR_INVALID_ARGUMENT,
+                             "log message formatting failed (vsnprintf returned "
+                             "a negative value); line dropped");
         return;
     }
     if ((unsigned int)n >= sizeof(msg_stack)) {

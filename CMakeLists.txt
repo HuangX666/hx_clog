@@ -242,6 +242,25 @@ install(EXPORT hx_clogTargets
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/hx_clog
 )
 
+# Some 32-bit targets (older ARM, MIPS) implement 64-bit atomics in libatomic
+# rather than inline; detect that so static links don't fail with undefined
+# __atomic_* symbols (M8).
+set(HX_CLOG_NEEDS_LIBATOMIC FALSE)
+if(NOT WIN32)
+    include(CheckCSourceCompiles)
+    set(_hx_atomic_src "#include <stdint.h>\nint main(void){ uint64_t x=0; (void)__atomic_add_fetch(&x,1,__ATOMIC_SEQ_CST); return (int)x; }")
+    check_c_source_compiles("${_hx_atomic_src}" HX_CLOG_ATOMIC_INLINE)
+    if(NOT HX_CLOG_ATOMIC_INLINE)
+        set(CMAKE_REQUIRED_LIBRARIES atomic)
+        check_c_source_compiles("${_hx_atomic_src}" HX_CLOG_ATOMIC_WITH_LIB)
+        unset(CMAKE_REQUIRED_LIBRARIES)
+        if(HX_CLOG_ATOMIC_WITH_LIB)
+            target_link_libraries(hx_clog PUBLIC atomic)
+            set(HX_CLOG_NEEDS_LIBATOMIC TRUE)
+        endif()
+    endif()
+endif()
+
 # pkg-config file for non-CMake consumers
 if(NOT WIN32)
     set(HX_CLOG_PC_LIBS_PRIVATE "-lpthread")
@@ -250,6 +269,9 @@ if(NOT WIN32)
     endif()
     if(HX_CLOG_USES_ZLIB)
         string(APPEND HX_CLOG_PC_LIBS_PRIVATE " -lz")
+    endif()
+    if(HX_CLOG_NEEDS_LIBATOMIC)
+        string(APPEND HX_CLOG_PC_LIBS_PRIVATE " -latomic")
     endif()
     configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/hx_clog.pc.in

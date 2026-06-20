@@ -23,6 +23,13 @@ if(HX_CLOG_ENABLE_NET)
     add_test(NAME test_net COMMAND test_net)
 endif()
 
+# fork() safety — POSIX only
+if(NOT WIN32)
+    add_executable(test_fork test_fork.c)
+    target_link_libraries(test_fork PRIVATE hx_clog::hx_clog)
+    add_test(NAME test_fork COMMAND test_fork)
+endif()
+
 add_executable(test_rotate test_rotate.c)
 target_link_libraries(test_rotate PRIVATE hx_clog::hx_clog)
 add_test(NAME test_rotate COMMAND test_rotate)
