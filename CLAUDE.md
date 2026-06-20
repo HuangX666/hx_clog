@@ -30,6 +30,8 @@ Key CMake options (all `ON` by default except shared/syslog): `HX_CLOG_BUILD_SHA
 
 To exercise the crash report path, configure with `-DHX_CLOG_TEST_TRIGGER_CRASH=ON`, rebuild `test_crash`, and run it — it deliberately faults and writes `crash_*.log` (+ `.dmp` on Windows) under `./test_crash_logs`.
 
+GitHub Actions (`.github/workflows/ci.yml`, triggers on push to `master`) is the real validation surface for the POSIX/MinGW branches and the concurrency code: it runs ubuntu/macOS/windows × Debug/Release, ubuntu-arm64, **ASan+UBSan and TSan**, an options matrix, and Android/iOS smoke builds. A Windows/MSVC-only local run cannot exercise the `pthread_atfork`/POSIX-crash code or the sanitizers — push and check CI for those. The repo is public, so CI status can be polled without auth: `curl -s https://api.github.com/repos/HuangX666/hx_clog/actions/runs?per_page=1`.
+
 ## Architecture
 
 The write path is the spine — trace it through these files:
@@ -47,11 +49,22 @@ The generic `hx_sink_write(sink, level, data, size)` switches on `sink->kind` (`
 
 ### Format settings and per-sink overrides
 
-Global pattern/format-mode/formatter live in core guarded by `sink_lock`, but the hot path reads them from a **per-thread cache** refreshed only when `format_gen` changes — never add a per-log lock acquisition for format settings. Per-sink overrides (`hx_clog_set_sink_pattern` / `hx_clog_set_sink_format_mode`) are stored on the sink and counted in the atomic `override_count`; `core_dispatch_record()` renders one default line plus one line per override sink and routes them via the `target` sink id (sync and async).
+Global pattern/format-mode/formatter live in core guarded by `sink_lock`, but the hot path reads them from a **per-thread cache** (`g_tls_fmt`, refreshed by `fmt_cache_refresh()` only when `format_gen` changes) — never add a per-log lock acquisition for format settings. The cache also holds the **default logger name**: the hot path must read it from `g_tls_fmt.logger_name`, never from `g_core.default_logger.name` directly, because `reconfigure()` rewrites that field under `sink_lock` and a lock-free read races it (TSan-confirmed). Anything else mutable that the hot path needs from a `reconfigure()`-writable field should ride the same `format_gen` cache. Per-sink overrides (`hx_clog_set_sink_pattern` / `hx_clog_set_sink_format_mode`) are stored on the sink and counted in the atomic `override_count`; `core_dispatch_record()` renders one default line plus one line per override sink and routes them via the `target` sink id (sync and async).
+
+### Format engine length contract
+
+`hx_format_record()` / `hx_format_json_record()` follow **snprintf semantics**: they return the *required* length, which may exceed the buffer, so the appender's `needed` counter keeps counting past `cap` (writes are still bounded). `format_with_retry()` uses that return value to size the heap buffer **exactly** (clamped to the line cap) and reformats once — this is what makes patterns that repeat `%v`/`%x`/`%F` expand fully instead of truncating at a guess. When adding a placeholder or any appender, keep `needed` accurate (every `ap_*` helper bumps it) or the heap retry will under-size.
 
 ### Compile gating
 
 `hx_clog_async.c` / `hx_clog_crash.c` are conditionally added to the source list in CMake **and** wrapped in `#if defined(HX_CLOG_ENABLE_ASYNC/CRASH)`. The public crash API symbols always exist: when crash is off, `hx_clog_core.c` provides stub implementations so the ABI stays stable. Anything you add that's optional must keep this dual gating (CMake list + `#if`) and preserve the public ABI.
+
+### Concurrency, locks, and fork
+
+- **`sink_lock` is recursive** (`hx_mutex_init_recursive`). User callback sinks run **while it is held**, and a callback may re-enter the public API (`hx_clog_get_sink_count`, `flush`, etc.) without self-deadlocking. Windows `CRITICAL_SECTION` is recursive already; POSIX gets `PTHREAD_MUTEX_RECURSIVE`. Don't "fix" this back to a plain mutex.
+- **Lock-free reads on the hot path must be paired with a synchronized write**, or routed through the `format_gen` cache. The only stat counters read without a lock would be a data race — async drop/high-watermark counters are read under `g_async_lock` for this reason.
+- **Fork (POSIX):** `pthread_atfork` handlers (`hx_atfork_prepare`/`hx_atfork_release`, registered in `core_once_init`) acquire **every** global lock in a fixed order across `fork()` so the child inherits them valid and unlocked. `hx_clog_after_fork_child()` then restarts the async worker and reopens file sinks. If you add a new global lock, add it to those handlers (and mind the existing order: init → sink → stats → async → err → dup → ring).
+- The async `reconfigure()` transition stays on the **sync path** until the new worker is running, and `core_dispatch_line()` falls back to a direct sink write when the engine is mid-teardown — this keeps `HX_CLOG_OVERFLOW_BLOCK` lossless across a concurrent reconfigure.
 
 ## Conventions that matter
 
@@ -61,6 +74,8 @@ Global pattern/format-mode/formatter live in core guarded by `sink_lock`, but th
 - **All paths are UTF-8 at runtime too.** On Windows every filesystem touch must go through the wide-API helpers in core (`hx_fopen`, `hx_file_exists`, `hx_rename`, `hx_remove`, `hx_mkdir_p`, `hx_utf8_to_wide`/`hx_wide_to_utf8`) — never call `fopen`/`*A()` Win32 functions on a path directly. `test_utf8path` enforces this with a Chinese dir/file name.
 - **`hx_clog_config_t` grows at the end only** (1.1.0: `rotate_align`, `max_compressed_files`; 1.2.0: `date_subdir`). Callers must initialize via `hx_clog_config_default()`; never insert fields in the middle. Retention defaults are `-1` (= unlimited / never delete) for both `max_backup_files` and `max_compressed_files`; cleanup orders backups by the date+index parsed from the name, not by mtime. When `date_subdir` is on the file sink writes under `<log_dir>/<YYYY-MM-DD>/` and rolls to a new folder at the day boundary; rotation/cleanup operate on `fs->active_dir` (the dated dir), not `fs->dir`.
 - Internal failures are reported through `hx_core_report_error()` (user-installed `hx_clog_set_error_handler`) — never printf from inside the library, and never call the handler while holding a lock the handler's contract doesn't know about.
-- Tests are driven through the **public API** (a capture callback sink), not internal symbols, so they pass for both static and shared builds. Follow that pattern for new tests.
+- **Rotation cleanup only ever touches strict archive names** — `archive_name_match()` requires the exact `<stem>.YYYY-MM-DD.<index>[.ext][.gz]` shape; anything else (a user's `app.notes.log` sharing the stem/ext) is left alone. The candidate arrays grow dynamically (`collect_grow()`), so retention holds past the initial 512. Never loosen this back to prefix+suffix matching — it deletes user data.
+- **MinGW:** `__USE_MINGW_ANSI_STDIO=1` is forced (top of `hx_clog_internal.h` *before any include*, and in CMake for `MINGW`). msvcrt's `vsnprintf` returns `-1` on truncation instead of the C99 length, which the write path needs to size its heap retry; without it long messages are silently dropped. Don't remove it.
+- Tests are driven through the **public API** (a capture callback sink), not internal symbols, so they pass for both static and shared builds. Follow that pattern for new tests. `tests/test_audit_fixes.c` (async-gated) is the regression suite for the release-readiness audit findings, including a concurrent-`reconfigure` stress that runs under CI's TSan/ASan jobs. The audit reports and their remediation status live in `docs/audit/`.
 - C core targets C99; the wrapper targets C++11. Keep the hot path allocation-free (stack buffer with a single heap fallback for long lines) and keep level filtering ahead of all work.
 - **Per-line size cap**: a single line is capped at 512 KB by default in *both* sync and async modes, enforced via `hx_clamp_line()` in `hx_clog_internal.h`. CMake `HX_CLOG_UNLIMITED_LINE=ON` removes the cap (memory-bound); `-DHX_CLOG_MAX_LINE_BYTES=N` overrides it. `test_largeline` covers both capped and unlimited behavior. The crash ring buffer entries stay fixed at `HX_CLOG_RING_ENTRY_SIZE` (512 B) by design — that only limits the crash-report replay, not normal output.
