@@ -22,8 +22,21 @@
 #  define HX_THREAD_LOCAL __declspec(thread)
 #elif defined(__GNUC__)
 #  define HX_THREAD_LOCAL __thread
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+/* C11 keyword — covers compilers that are neither MSVC nor GCC/Clang
+ * (Oracle Studio, recent ICC, etc.) so TLS does not silently degrade. */
+#  define HX_THREAD_LOCAL _Thread_local
 #else
 #  define HX_THREAD_LOCAL
+#endif
+
+/* C11 atomics are used only as the fallback for compilers that provide neither
+ * the Windows Interlocked API nor the GCC/Clang __atomic builtins. */
+#if !defined(HX_PLATFORM_WINDOWS) && !defined(__GNUC__) && \
+    defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && \
+    !defined(__STDC_NO_ATOMICS__)
+#  include <stdatomic.h>
+#  define HX_CLOG_USE_C11_ATOMICS 1
 #endif
 
 /* =========================================================================
@@ -238,6 +251,8 @@ void hx_atomic_store_level(volatile int* p, int v) {
     InterlockedExchange((volatile LONG*)p, v);
 #elif defined(__GNUC__)
     __atomic_store_n(p, v, __ATOMIC_RELAXED);
+#elif defined(HX_CLOG_USE_C11_ATOMICS)
+    atomic_store_explicit((volatile _Atomic int*)p, v, memory_order_relaxed);
 #else
     *p = v;
 #endif
@@ -247,6 +262,8 @@ int hx_atomic_load_level(volatile int* p) {
     return (int)InterlockedCompareExchange((volatile LONG*)p, 0, 0);
 #elif defined(__GNUC__)
     return __atomic_load_n(p, __ATOMIC_RELAXED);
+#elif defined(HX_CLOG_USE_C11_ATOMICS)
+    return (int)atomic_load_explicit((volatile _Atomic int*)p, memory_order_relaxed);
 #else
     return *p;
 #endif
@@ -503,6 +520,11 @@ void hx_ring_init(void) {
     }
     g_ring = (ring_entry_t*)hx_clog__malloc(sizeof(ring_entry_t) * HX_CLOG_RING_CAPACITY);
     if (!g_ring) {
+        /* without the ring, the crash report cannot replay the last N logs;
+         * surface it instead of silently turning every ring_push into a no-op */
+        hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                             "crash ring buffer allocation failed; crash reports "
+                             "will not include recent log history");
         return;
     }
     memset(g_ring, 0, sizeof(ring_entry_t) * HX_CLOG_RING_CAPACITY);
@@ -700,6 +722,15 @@ typedef struct {
     unsigned long long written_lines;
     unsigned long long rotated_files;
     unsigned long long dropped_lines;
+
+    /* snapshot of the last-applied config for hx_clog_get_config(); the string
+     * fields point at the owned buffers below. Written under init_lock. */
+    hx_clog_config_t active_config;
+    char cfg_logger_name[128];
+    char cfg_log_dir[HX_CLOG_PATH_MAX];
+    char cfg_file_name[256];
+    char cfg_pattern[512];
+    char cfg_system_logger_name[128];
 } hx_core_state_t;
 
 static hx_core_state_t g_core;
@@ -1182,6 +1213,41 @@ static void close_non_callback_sinks_locked(void) {
     }
 }
 
+/* Copy `cfg` (already defaulted/validated) into g_core.active_config so
+ * hx_clog_get_config() can return it. String fields are copied into owned
+ * buffers and re-pointed there. Caller holds init_lock. */
+static void store_active_config_locked(const hx_clog_config_t* cfg) {
+    g_core.active_config = *cfg;
+    /* reflect the live state, not the requested one (async may have fallen
+     * back to sync; level may have been changed via hx_clog_set_level) */
+    g_core.active_config.mode = (hx_clog_mode_t)core_get_mode();
+    g_core.active_config.level =
+        (hx_clog_level_t)hx_atomic_load_level(&g_core.level);
+#define HX_CFG_COPY_STR(field, buf) \
+    do { \
+        strncpy(g_core.buf, (cfg->field ? cfg->field : ""), sizeof(g_core.buf) - 1); \
+        g_core.buf[sizeof(g_core.buf) - 1] = '\0'; \
+        g_core.active_config.field = g_core.buf; \
+    } while (0)
+    HX_CFG_COPY_STR(logger_name, cfg_logger_name);
+    HX_CFG_COPY_STR(log_dir, cfg_log_dir);
+    HX_CFG_COPY_STR(file_name, cfg_file_name);
+    HX_CFG_COPY_STR(pattern, cfg_pattern);
+    HX_CFG_COPY_STR(system_logger_name, cfg_system_logger_name);
+#undef HX_CFG_COPY_STR
+    /* formatter/user_data pointers are passed through as-is (caller-owned) */
+}
+
+/* atexit hook: flush (not shutdown) on normal process exit so async/buffered
+ * lines are not lost when the program forgets to call hx_clog_shutdown(). Safe
+ * and idempotent — a no-op once shut down. Registered once. */
+static int g_atexit_registered = 0;
+static void hx_atexit_flush(void) {
+    if (core_is_initialized()) {
+        hx_clog_flush();
+    }
+}
+
 static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
     hx_clog_config_t cfg;
 
@@ -1262,7 +1328,13 @@ static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
     }
 #endif
 
+    store_active_config_locked(&cfg);
     core_set_initialized(1);
+
+    if (!g_atexit_registered) {
+        atexit(hx_atexit_flush);
+        g_atexit_registered = 1;
+    }
 
 #if defined(HX_CLOG_ENABLE_CRASH)
     if (cfg.enable_crash_handler) {
@@ -1502,6 +1574,7 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
         /* on failure: stay in SYNC (already set) */
     }
 #endif
+    store_active_config_locked(&cfg);
     return HX_CLOG_OK;
 }
 
@@ -1552,6 +1625,24 @@ int hx_clog_get_stats(hx_clog_stats_t* stats) {
     stats->queue_high_watermark = 0;
 #endif
     hx_mutex_unlock(&g_core.stats_lock);
+    return HX_CLOG_OK;
+}
+
+int hx_clog_get_config(hx_clog_config_t* out) {
+    if (!out) {
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
+    ensure_once();
+    if (!core_is_initialized()) {
+        return HX_CLOG_ERR_NOT_INITIALIZED;
+    }
+    hx_mutex_lock(&g_core.init_lock);
+    *out = g_core.active_config;
+    hx_mutex_unlock(&g_core.init_lock);
+    /* NOTE: the returned string pointers (logger_name, log_dir, file_name,
+     * pattern, system_logger_name) reference internal storage that stays valid
+     * until the next hx_clog_init()/hx_clog_reconfigure(). Copy them out if you
+     * need them for longer. */
     return HX_CLOG_OK;
 }
 
@@ -1704,7 +1795,7 @@ int hx_clog_set_duplicate_suppression(int enable, unsigned int window_ms) {
         dup_flush_pending();
     }
     hx_mutex_lock(&g_dup.lock);
-    g_dup.enabled = enable ? 1 : 0;
+    hx_atomic_store_level(&g_dup.enabled, enable ? 1 : 0);
     g_dup.window_ms = window_ms ? window_ms : 1000;
     if (!enable) {
         g_dup.have_last = 0;
@@ -2172,8 +2263,9 @@ static void core_writev(const char* logger_name,
         logger_name = g_tls_fmt.logger_name;
     }
 
-    /* fold consecutive duplicates when suppression is enabled */
-    if (g_dup.enabled &&
+    /* fold consecutive duplicates when suppression is enabled (atomic read:
+     * the flag is toggled from another thread under g_dup.lock) */
+    if (hx_atomic_load_level(&g_dup.enabled) &&
         dup_check_and_update(level, file, line, logger_name, msg, msg_len)) {
         if (msg_heap) {
             hx_clog__free(msg_heap);

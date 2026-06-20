@@ -197,6 +197,12 @@ HX_CLOG_API void hx_clog_flush(void);
 HX_CLOG_API int  hx_clog_is_initialized(void);
 HX_CLOG_API int  hx_clog_reconfigure(const hx_clog_config_t* config);
 
+/* Read back the currently-applied configuration (reflects env overrides and any
+ * async->sync fallback). Returns HX_CLOG_ERR_NOT_INITIALIZED before init. The
+ * string fields point at internal storage valid until the next
+ * init/reconfigure — copy them if you need to keep them. */
+HX_CLOG_API int  hx_clog_get_config(hx_clog_config_t* out_config);
+
 HX_CLOG_API void            hx_clog_set_level(hx_clog_level_t level);
 HX_CLOG_API hx_clog_level_t hx_clog_get_level(void);
 HX_CLOG_API int             hx_clog_set_pattern(const char* pattern);
@@ -439,67 +445,113 @@ HX_CLOG_API void hx_clog_after_fork_child(void);
 /* -------------------------------------------------------------------------
  * Logging macros
  * ------------------------------------------------------------------------- */
-#if defined(_MSC_VER) && !defined(__clang__) && (_MSC_VER < 1920)
-/* Old MSVC: provide a traditional variadic macro form. */
-#  define HX_LOG_TRACE(...) hx_clog_write(HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_DEBUG(...) hx_clog_write(HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_INFO(...)  hx_clog_write(HX_CLOG_LEVEL_INFO,  __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_WARN(...)  hx_clog_write(HX_CLOG_LEVEL_WARN,  __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_ERROR(...) hx_clog_write(HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_FATAL(...) hx_clog_write(HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#else
-#  define HX_LOG_TRACE(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_DEBUG(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_INFO(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_INFO, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_WARN(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_WARN, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_ERROR(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_FATAL(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+/* Compile-time level cutting (à la spdlog's SPDLOG_ACTIVE_LEVEL). Define
+ * HX_CLOG_ACTIVE_LEVEL to one of the HX_CLOG_LEVEL_NUM_* constants — e.g.
+ * -DHX_CLOG_ACTIVE_LEVEL=HX_CLOG_LEVEL_NUM_INFO — and every macro below that
+ * level expands to ((void)0): zero code, zero binary size, and the arguments
+ * are never evaluated. Default keeps everything compiled in. The unified
+ * `(...)` form works on every compiler (old MSVC included), so no version
+ * split is needed. */
+#define HX_CLOG_LEVEL_NUM_TRACE 0
+#define HX_CLOG_LEVEL_NUM_DEBUG 1
+#define HX_CLOG_LEVEL_NUM_INFO  2
+#define HX_CLOG_LEVEL_NUM_WARN  3
+#define HX_CLOG_LEVEL_NUM_ERROR 4
+#define HX_CLOG_LEVEL_NUM_FATAL 5
+#define HX_CLOG_LEVEL_NUM_OFF   6
+
+#ifndef HX_CLOG_ACTIVE_LEVEL
+#  define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_TRACE
 #endif
 
-#if defined(_MSC_VER) && !defined(__clang__) && (_MSC_VER < 1920)
-#  define HX_LOG_NAMED_TRACE(name, ...) hx_clog_write_named(HX_CLOG_LEVEL_TRACE, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_NAMED_DEBUG(name, ...) hx_clog_write_named(HX_CLOG_LEVEL_DEBUG, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_NAMED_INFO(name, ...)  hx_clog_write_named(HX_CLOG_LEVEL_INFO,  name, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_NAMED_WARN(name, ...)  hx_clog_write_named(HX_CLOG_LEVEL_WARN,  name, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_NAMED_ERROR(name, ...) hx_clog_write_named(HX_CLOG_LEVEL_ERROR, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOG_NAMED_FATAL(name, ...) hx_clog_write_named(HX_CLOG_LEVEL_FATAL, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOGGER_TRACE(logger, ...) hx_clog_logger_write(logger, HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOGGER_DEBUG(logger, ...) hx_clog_logger_write(logger, HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOGGER_INFO(logger, ...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_INFO,  __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOGGER_WARN(logger, ...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_WARN,  __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOGGER_ERROR(logger, ...) hx_clog_logger_write(logger, HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#  define HX_LOGGER_FATAL(logger, ...) hx_clog_logger_write(logger, HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, __VA_ARGS__)
+/* HX_LOG_<L>_IF(cond, ...): log only when cond is true. HX_LOG_<L>_EVERY_N(n,
+ * ...): log on the 1st and then every n-th call at that site (per-site static
+ * counter; the count is approximate under concurrency — not atomic — matching
+ * glog's default). When the level is compiled out, the condition / counter are
+ * not evaluated at all. */
+
+#if HX_CLOG_ACTIVE_LEVEL <= HX_CLOG_LEVEL_NUM_TRACE
+#  define HX_LOG_TRACE(...)           hx_clog_write(HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_NAMED_TRACE(name,...) hx_clog_write_named(HX_CLOG_LEVEL_TRACE, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOGGER_TRACE(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_TRACE_IF(cond,...)    do { if (cond) HX_LOG_TRACE(__VA_ARGS__); } while (0)
+#  define HX_LOG_TRACE_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_TRACE(__VA_ARGS__); } while (0)
 #else
-#  define HX_LOG_NAMED_TRACE(name, fmt, ...) \
-    hx_clog_write_named(HX_CLOG_LEVEL_TRACE, name, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_NAMED_DEBUG(name, fmt, ...) \
-    hx_clog_write_named(HX_CLOG_LEVEL_DEBUG, name, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_NAMED_INFO(name, fmt, ...) \
-    hx_clog_write_named(HX_CLOG_LEVEL_INFO, name, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_NAMED_WARN(name, fmt, ...) \
-    hx_clog_write_named(HX_CLOG_LEVEL_WARN, name, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_NAMED_ERROR(name, fmt, ...) \
-    hx_clog_write_named(HX_CLOG_LEVEL_ERROR, name, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOG_NAMED_FATAL(name, fmt, ...) \
-    hx_clog_write_named(HX_CLOG_LEVEL_FATAL, name, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOGGER_TRACE(logger, fmt, ...) \
-    hx_clog_logger_write(logger, HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOGGER_DEBUG(logger, fmt, ...) \
-    hx_clog_logger_write(logger, HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOGGER_INFO(logger, fmt, ...) \
-    hx_clog_logger_write(logger, HX_CLOG_LEVEL_INFO, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOGGER_WARN(logger, fmt, ...) \
-    hx_clog_logger_write(logger, HX_CLOG_LEVEL_WARN, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOGGER_ERROR(logger, fmt, ...) \
-    hx_clog_logger_write(logger, HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#  define HX_LOGGER_FATAL(logger, fmt, ...) \
-    hx_clog_logger_write(logger, HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+#  define HX_LOG_TRACE(...)            ((void)0)
+#  define HX_LOG_NAMED_TRACE(name,...) ((void)0)
+#  define HX_LOGGER_TRACE(logger,...)  ((void)0)
+#  define HX_LOG_TRACE_IF(cond,...)    ((void)0)
+#  define HX_LOG_TRACE_EVERY_N(n,...)  ((void)0)
+#endif
+
+#if HX_CLOG_ACTIVE_LEVEL <= HX_CLOG_LEVEL_NUM_DEBUG
+#  define HX_LOG_DEBUG(...)           hx_clog_write(HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_NAMED_DEBUG(name,...) hx_clog_write_named(HX_CLOG_LEVEL_DEBUG, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOGGER_DEBUG(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_DEBUG_IF(cond,...)    do { if (cond) HX_LOG_DEBUG(__VA_ARGS__); } while (0)
+#  define HX_LOG_DEBUG_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_DEBUG(__VA_ARGS__); } while (0)
+#else
+#  define HX_LOG_DEBUG(...)            ((void)0)
+#  define HX_LOG_NAMED_DEBUG(name,...) ((void)0)
+#  define HX_LOGGER_DEBUG(logger,...)  ((void)0)
+#  define HX_LOG_DEBUG_IF(cond,...)    ((void)0)
+#  define HX_LOG_DEBUG_EVERY_N(n,...)  ((void)0)
+#endif
+
+#if HX_CLOG_ACTIVE_LEVEL <= HX_CLOG_LEVEL_NUM_INFO
+#  define HX_LOG_INFO(...)            hx_clog_write(HX_CLOG_LEVEL_INFO, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_NAMED_INFO(name,...) hx_clog_write_named(HX_CLOG_LEVEL_INFO, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOGGER_INFO(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_INFO, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_INFO_IF(cond,...)    do { if (cond) HX_LOG_INFO(__VA_ARGS__); } while (0)
+#  define HX_LOG_INFO_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_INFO(__VA_ARGS__); } while (0)
+#else
+#  define HX_LOG_INFO(...)            ((void)0)
+#  define HX_LOG_NAMED_INFO(name,...) ((void)0)
+#  define HX_LOGGER_INFO(logger,...)  ((void)0)
+#  define HX_LOG_INFO_IF(cond,...)    ((void)0)
+#  define HX_LOG_INFO_EVERY_N(n,...)  ((void)0)
+#endif
+
+#if HX_CLOG_ACTIVE_LEVEL <= HX_CLOG_LEVEL_NUM_WARN
+#  define HX_LOG_WARN(...)            hx_clog_write(HX_CLOG_LEVEL_WARN, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_NAMED_WARN(name,...) hx_clog_write_named(HX_CLOG_LEVEL_WARN, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOGGER_WARN(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_WARN, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_WARN_IF(cond,...)    do { if (cond) HX_LOG_WARN(__VA_ARGS__); } while (0)
+#  define HX_LOG_WARN_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_WARN(__VA_ARGS__); } while (0)
+#else
+#  define HX_LOG_WARN(...)            ((void)0)
+#  define HX_LOG_NAMED_WARN(name,...) ((void)0)
+#  define HX_LOGGER_WARN(logger,...)  ((void)0)
+#  define HX_LOG_WARN_IF(cond,...)    ((void)0)
+#  define HX_LOG_WARN_EVERY_N(n,...)  ((void)0)
+#endif
+
+#if HX_CLOG_ACTIVE_LEVEL <= HX_CLOG_LEVEL_NUM_ERROR
+#  define HX_LOG_ERROR(...)           hx_clog_write(HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_NAMED_ERROR(name,...) hx_clog_write_named(HX_CLOG_LEVEL_ERROR, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOGGER_ERROR(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_ERROR_IF(cond,...)    do { if (cond) HX_LOG_ERROR(__VA_ARGS__); } while (0)
+#  define HX_LOG_ERROR_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_ERROR(__VA_ARGS__); } while (0)
+#else
+#  define HX_LOG_ERROR(...)           ((void)0)
+#  define HX_LOG_NAMED_ERROR(name,...) ((void)0)
+#  define HX_LOGGER_ERROR(logger,...)  ((void)0)
+#  define HX_LOG_ERROR_IF(cond,...)    ((void)0)
+#  define HX_LOG_ERROR_EVERY_N(n,...)  ((void)0)
+#endif
+
+#if HX_CLOG_ACTIVE_LEVEL <= HX_CLOG_LEVEL_NUM_FATAL
+#  define HX_LOG_FATAL(...)           hx_clog_write(HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_NAMED_FATAL(name,...) hx_clog_write_named(HX_CLOG_LEVEL_FATAL, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOGGER_FATAL(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#  define HX_LOG_FATAL_IF(cond,...)    do { if (cond) HX_LOG_FATAL(__VA_ARGS__); } while (0)
+#  define HX_LOG_FATAL_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_FATAL(__VA_ARGS__); } while (0)
+#else
+#  define HX_LOG_FATAL(...)           ((void)0)
+#  define HX_LOG_NAMED_FATAL(name,...) ((void)0)
+#  define HX_LOGGER_FATAL(logger,...)  ((void)0)
+#  define HX_LOG_FATAL_IF(cond,...)    ((void)0)
+#  define HX_LOG_FATAL_EVERY_N(n,...)  ((void)0)
 #endif
 
 #ifdef __cplusplus
