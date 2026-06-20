@@ -6,6 +6,8 @@ All notable changes to hx_clog are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-20
+
 ### Added
 - **Compile-time level cutting**: `HX_CLOG_ACTIVE_LEVEL` (with the
   `HX_CLOG_LEVEL_NUM_*` constants). Macros below the active level expand to

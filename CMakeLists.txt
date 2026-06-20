@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(hx_clog
-    VERSION 1.2.0
+    VERSION 1.3.0
     DESCRIPTION "A portable C/C++11 logging framework"
     LANGUAGES C CXX
 )
@@ -91,6 +91,19 @@ target_include_directories(hx_clog
 )
 
 target_compile_features(hx_clog PUBLIC c_std_99)
+
+# Release-quality shared library: version the soname and hide everything that
+# is not explicitly marked HX_CLOG_API (which is visibility("default")), so the
+# dynamic symbol table matches the public ABI. Static builds keep default
+# visibility so consumers can still link/re-export.
+if(HX_CLOG_BUILD_SHARED)
+    set_target_properties(hx_clog PROPERTIES
+        VERSION ${PROJECT_VERSION}
+        SOVERSION ${PROJECT_VERSION_MAJOR}
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+endif()
 
 if(MINGW)
     # MinGW's default msvcrt printf family is not C99: vsnprintf returns -1 on
