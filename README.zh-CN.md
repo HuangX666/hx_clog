@@ -19,11 +19,13 @@
 | 可选封装 | C++11 RAII wrapper |
 | 构建系统 | CMake 3.16+ |
 | 支持平台 | Windows、Linux、macOS；CI smoke build 覆盖 Android arm64-v8a / iOS arm64 |
-| 输出目标 | Console、File、Rotate File、Syslog、Windows Event Log、Android logcat、Apple os_log、自定义 callback |
+| 输出目标 | Console、File、Rotate File、**TCP/UDP 网络**、Syslog、Windows Event Log、Android logcat、Apple os_log、自定义 callback |
 | 写入模式 | 同步 / 异步，支持阻塞、丢弃新日志、丢弃旧日志等队列溢出策略 |
 | 格式化 | pattern、自定义 formatter、JSON 输出 |
+| 编译期 | `HX_CLOG_ACTIVE_LEVEL` 裁剪门槛以下的级别（零代码、参数不求值） |
 | 可靠性 | 文件轮转、启动轮转、时间间隔轮转、崩溃日志、最后 N 条日志 ring buffer |
-| 扩展点 | sink、formatter、allocator、命名 logger、线程本地 context |
+| 配置 | 运行时 API、环境变量、INI 文件（`hx_clog_init_from_file`） |
+| 扩展点 | sink、formatter、allocator、命名 logger 注册表 + 层级、线程本地 context |
 
 ## CI/CD 状态
 
@@ -39,6 +41,74 @@
 | `packaging-smoke` | Linux Release 安装包 smoke test，验证导出的 CMake package 和 public headers |
 | `mobile-smoke` | Android arm64-v8a 和 iOS arm64 交叉编译 smoke build（含 crash handler） |
 | Linux syslog check | CI 中启用 `HX_CLOG_ENABLE_SYSLOG=ON` 编译 syslog sink 路径 |
+
+## 1.3.0 变更摘要
+
+本版本把 hx_clog 提升到 spdlog/glog 级别的功能覆盖，同时保持 C ABI 纯增量、稳定，
+并合入了 1.2.0 发布就绪审计的全部修复（见 [docs/audit](docs/audit/)）。
+
+**新功能**
+
+- **编译期级别裁剪** —— 定义 `HX_CLOG_ACTIVE_LEVEL`（配合 `HX_CLOG_LEVEL_NUM_*` 常量）。
+  门槛以下的 `HX_LOG_*` 展开为 `((void)0)`：不生成代码，参数也不会被求值。
+
+  ```c
+  #define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_INFO
+  #include "hx_clog.h"
+  HX_LOG_DEBUG("x=%d", expensive());  /* 被裁剪：expensive() 不会被调用 */
+  ```
+
+- **条件 / 采样宏**（glog 风格）—— `HX_LOG_<LEVEL>_IF(cond, ...)` 与
+  `HX_LOG_<LEVEL>_EVERY_N(n, ...)`：
+
+  ```c
+  HX_LOG_WARN_IF(rc != 0, "请求失败: %d", rc);
+  HX_LOG_INFO_EVERY_N(1000, "已处理 %llu 条", total);  /* 第 1 条，之后每 1000 条 */
+  ```
+
+- **TCP/UDP 网络 sink** —— `hx_clog_add_network_sink()`（`HX_CLOG_ENABLE_NET` 门控，默认开）。
+  TCP 保持连接并在失败后限速重连；UDP fire-and-forget。**首次写入时才惰性建连**，
+  所以添加 sink 不会阻塞、collector 暂时不可用也不会导致 init 失败；链路断开期间丢行
+  （由上游异步队列做缓冲）。
+
+  ```c
+  hx_clog_add_network_sink(HX_CLOG_NET_TCP, "logs.example.com", 5170, NULL);
+  ```
+
+- **INI 配置文件** —— `hx_clog_init_from_file("hx_clog.ini")`。文件用 `[hx_clog]` 段的
+  `key=value` 行（键对应配置字段；`#`/`;` 为注释；尺寸支持 `K`/`M`/`G`）。见 [§19](#19-配置文件支持)。
+
+- **命名 logger 注册表 + 点分层级** —— `hx_clog_logger_get(name)` 返回已有或创建+注册一个
+  （无需保存指针）；`hx_clog_logger_find` / `hx_clog_logger_count` / `hx_clog_logger_drop_all`。
+  新建的 `"net.http"` 继承最近祖先 `"net"` 的级别；`hx_clog_set_level_for_prefix("net", level)`
+  一次设置整棵子树。
+
+  ```c
+  hx_clog_set_level_for_prefix("net", HX_CLOG_LEVEL_DEBUG);
+  hx_clog_logger_t* http = hx_clog_logger_get("net.http"); /* 继承 DEBUG */
+  HX_LOGGER_INFO(http, "connected");
+  ```
+
+- **配置读回** —— `hx_clog_get_config()` 返回当前生效配置（反映 env 覆盖与 async→sync 回退）。
+- **atexit 自动 flush** —— 正常退出时即使没调用 `hx_clog_shutdown()` 也会冲刷缓冲/异步日志。
+
+**可靠性修复（来自 1.2.0 审计）**
+
+- 轮转清理严格匹配 `<stem>.YYYY-MM-DD.<index>[.ext][.gz]`，绝不删除像 `app.notes.log`
+  这类只是共享前缀/扩展名的用户文件；候选集可超过 512。
+- 异步 `hx_clog_reconfigure()` 在并发写入下无损（`HX_CLOG_OVERFLOW_BLOCK` 不再静默丢失）。
+- `hx_clog_get_stats()` 在 init 之前调用安全。
+- POSIX `fork()` 经 `pthread_atfork` 保护；`sink_lock` 递归，回调可重入 API；默认 logger 名与
+  异步统计计数器的数据竞争修复（TSan 干净）。
+- 重复 `%v`/`%x` pattern 完整展开，不再在行上限前截断；crash ring 与轮转 OOM 经 error handler 上报。
+- MinGW 改用 C99 `vsnprintf`（`__USE_MINGW_ANSI_STDIO`），并串行化 `localtime()`。
+
+**打包**
+
+- 共享库带 `SOVERSION`、Unix 下隐藏可见性（动态符号表只导出 `HX_CLOG_API`）。非 MSVC/非 GCC
+  编译器有 C11 `_Thread_local`/`<stdatomic.h>` 回退；按需链接 `-latomic`。新增 `CHANGELOG.md`、`SECURITY.md`。
+
+> 所有新增均为末尾追加；C ABI 自 1.2.0 起保持稳定。
 
 ## 1.1.0 变更摘要
 
@@ -75,13 +145,15 @@
 | C 优先 | 公开 API 使用 C ABI，方便 C、C++、Rust、Go、Python FFI 或扩展层接入 |
 | 跨平台 | Windows / Linux / macOS CI 全覆盖，平台相关 sink 通过条件编译启用 |
 | 同步和异步 | 小工具可用同步模式，服务端可用异步队列降低业务线程 IO 阻塞 |
-| 多 logger | 支持默认 logger、命名 logger、独立 logger level 和 `HX_LOG_NAMED_*` 宏 |
+| 多 logger | 默认 logger、命名 logger、注册表（`hx_clog_logger_get`/`find`）与点分名级别层级，以及 `HX_LOG_NAMED_*` / `HX_LOGGER_*` 宏 |
 | 上下文日志 | 支持 thread-local context，pattern 中用 `%x` 输出，JSON 中自动携带 |
 | 多格式输出 | 内置 pattern、JSON formatter，也可注册自定义 formatter |
-| 多输出目标 | 控制台、文件、轮转文件、系统日志和自定义 callback sink |
+| 多输出目标 | 控制台、文件、轮转文件、**TCP/UDP 网络**、系统日志和自定义 callback sink |
+| 编译期裁剪 | `HX_CLOG_ACTIVE_LEVEL` 完全移除门槛以下的调用（spdlog 风格） |
+| 条件日志 | `HX_LOG_*_IF(cond, ...)` 与 `HX_LOG_*_EVERY_N(n, ...)`（glog 风格） |
 | 文件轮转 | 支持按大小、按天、按时间间隔、启动时归档旧 active 文件，超出保留数量的旧备份可用 zlib 压缩为 `.gz` |
 | 崩溃日志 | 支持 SEH / POSIX signal 捕获、调用栈、寄存器 dump、最后日志保护 |
-| 运行时配置 | 支持运行时修改级别、pattern、formatter、format mode 和重建内置 sinks |
+| 配置 | 运行时 API、INI 文件（`hx_clog_init_from_file`）、环境变量，以及 `hx_clog_get_config` 读回 |
 
 ## 快速开始
 
@@ -298,6 +370,9 @@ typedef enum hx_clog_rotate_policy {
 
 ### 5.2 配置结构
 
+填充字段前务必先用 `hx_clog_config_default()` 清零；结构体只在末尾追加，这样可保持跨版本
+源码兼容。完整、权威的字段参考见 [docs/api.md](docs/api.md)。
+
 ```c
 typedef struct hx_clog_config {
     const char* logger_name;       /* 默认 "hx_clog" */
@@ -310,17 +385,37 @@ typedef struct hx_clog_config {
     int enable_file;               /* 默认 1 */
     int enable_color;              /* 默认 1，仅控制台 */
     int enable_crash_handler;      /* 默认 0，显式开启 */
+    int enable_syslog;             /* Unix/Apple syslog */
+    int enable_event_log;          /* Windows Event Log */
+    int enable_android_log;        /* Android logcat    */
+    int enable_apple_log;          /* Apple os_log      */
 
     hx_clog_rotate_policy_t rotate_policy;
-    unsigned long long max_file_size;  /* 例如 10 * 1024 * 1024 */
-    int max_backup_files;              /* 例如 10 */
-    int rotate_daily;                  /* 是否按天切分 */
+    unsigned long long max_file_size;     /* 例如 10 * 1024 * 1024            */
+    int max_backup_files;                 /* 保留的最新明文备份数，更旧的被压缩。
+                                           * -1 = 全部保留（不压缩/不删除）。默认 -1 */
+    int max_backup_days;                  /* 删除超过 N 天的备份，0=关闭         */
+    int rotate_daily;                     /* 按天切分                          */
+    unsigned int rotate_interval_seconds; /* 时间间隔轮转，0=关闭               */
+    int rotate_on_startup;                /* init 时归档已存在的 active 文件     */
 
-    unsigned int async_queue_size;     /* 默认 8192 */
-    unsigned int async_batch_size;     /* 默认 64 */
-    unsigned int flush_interval_ms;    /* 默认 1000 */
+    unsigned int async_queue_size;        /* 默认 8192                        */
+    unsigned int async_batch_size;        /* 默认 64                          */
+    unsigned int flush_interval_ms;       /* 默认 1000                        */
+    hx_clog_overflow_policy_t overflow_policy; /* BLOCK / DROP_NEW / DROP_OLD */
 
-    const char* pattern;               /* 默认内置格式 */
+    const char* pattern;                  /* 默认内置格式                      */
+    hx_clog_format_mode_t format_mode;    /* PATTERN（默认）或 JSON           */
+    hx_clog_formatter_t formatter;        /* 可选自定义 formatter             */
+    void* formatter_user_data;
+    const char* system_logger_name;       /* 系统 sink 的 ident/tag           */
+
+    /* 1.1.0 新增 */
+    int rotate_align;                     /* 时间间隔轮转对齐到时钟边界          */
+    int max_compressed_files;             /* .gz 备份上限。-1 = 不限（默认）；
+                                           * 0 = 用 max_backup_files            */
+    /* 1.2.0 新增 */
+    int date_subdir;                      /* 写入 <log_dir>/<YYYY-MM-DD>/        */
 } hx_clog_config_t;
 ```
 
@@ -339,14 +434,20 @@ typedef struct hx_clog_config {
 ### 5.3 生命周期接口
 
 ```c
-int hx_clog_init(const hx_clog_config_t* config);
+int  hx_clog_init(const hx_clog_config_t* config);
+int  hx_clog_init_from_file(const char* path);   /* 从 INI 文件初始化（§19） */
 void hx_clog_shutdown(void);
-void hx_clog_flush(void);
+void hx_clog_flush(void);                         /* 正常退出时也会自动执行（atexit） */
+int  hx_clog_is_initialized(void);
+int  hx_clog_reconfigure(const hx_clog_config_t* config);
+int  hx_clog_get_config(hx_clog_config_t* out);   /* 读回当前生效配置 */
 
-void hx_clog_set_level(hx_clog_level_t level);
+void            hx_clog_set_level(hx_clog_level_t level);
 hx_clog_level_t hx_clog_get_level(void);
+int             hx_clog_set_pattern(const char* pattern);
+int             hx_clog_set_format_mode(hx_clog_format_mode_t mode);
 
-int hx_clog_reopen(void);  /* logrotate 或外部移动文件后重新打开 */
+int  hx_clog_reopen(void);  /* logrotate 或外部移动文件后重新打开 */
 ```
 
 ### 5.4 写日志接口
@@ -373,27 +474,34 @@ void hx_clog_writev(
 
 ### 5.5 推荐宏
 
+下列宏都会自动带上 `__FILE__`、`__LINE__`、`__func__`，且在所有编译器（含老版 MSVC）上调用语法一致。
+
 ```c
-#define HX_LOG_TRACE(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+/* 默认 logger */
+HX_LOG_TRACE(fmt, ...);  HX_LOG_DEBUG(fmt, ...);  HX_LOG_INFO(fmt, ...);
+HX_LOG_WARN(fmt, ...);   HX_LOG_ERROR(fmt, ...);  HX_LOG_FATAL(fmt, ...);
 
-#define HX_LOG_DEBUG(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+/* 命名 logger（按名字 / 按 logger 句柄）*/
+HX_LOG_NAMED_INFO("net", "connected to %s", host);
+HX_LOGGER_INFO(logger, "connected");
 
-#define HX_LOG_INFO(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_INFO, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-
-#define HX_LOG_WARN(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_WARN, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-
-#define HX_LOG_ERROR(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-
-#define HX_LOG_FATAL(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+/* 条件 / 采样（glog 风格）*/
+HX_LOG_WARN_IF(rc != 0, "failed: %d", rc);
+HX_LOG_INFO_EVERY_N(1000, "processed %llu", total);  /* 第 1 条，之后每 1000 条 */
 ```
 
-> Windows MSVC 老版本对 `##__VA_ARGS__` 支持不一致时，可以额外提供 `HX_LOG_INFO0("message")` 或使用 C99/C++20 兼容宏方案。
+**编译期级别裁剪。** 在 include 头文件之前定义 `HX_CLOG_ACTIVE_LEVEL` 为
+`HX_CLOG_LEVEL_NUM_TRACE … HX_CLOG_LEVEL_NUM_OFF` 之一（或传
+`-DHX_CLOG_ACTIVE_LEVEL=HX_CLOG_LEVEL_NUM_INFO`）。门槛以下的每个宏展开为
+`((void)0)`——不生成代码，参数也不会被求值：
+
+```c
+#define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_INFO
+#include "hx_clog.h"
+HX_LOG_DEBUG("expensive: %d", compute());  /* 整体被裁剪 */
+```
+
+> 运行时 `hx_clog_set_level()` 过滤与编译期门槛相互独立：一条日志必须**同时**通过两者才会输出。
 
 ## 6. C 使用示例
 
@@ -1007,11 +1115,40 @@ typedef struct hx_clog_sink_vtable {
 | Console Sink | 输出到 stdout/stderr，按级别着色 |
 | File Sink | 输出到固定文件 |
 | Rotate File Sink | 自动轮转文件 |
+| Network Sink | 把每行发送到 TCP/UDP collector（`HX_CLOG_ENABLE_NET`） |
 | Crash Sink | 专门写 crash 信息 |
 | Callback Sink | 用户自定义处理，例如写入 GUI、网络、数据库 |
 | Syslog Sink | Linux/macOS 系统日志，可选 |
 | EventLog Sink | Windows Event Log，可选 |
 | Android Log Sink | Android logcat，可选 |
+
+init 之后添加的 sink 会拿到一个 sink id；每个 sink 可有独立的最低级别
+（`hx_clog_set_sink_level`）和 format 覆盖（`hx_clog_set_sink_pattern`）。
+
+```c
+hx_clog_sink_id_t id = 0;
+hx_clog_add_callback_sink_ex(my_cb, user, &id);
+hx_clog_add_syslog_sink("myapp", NULL);          /* Unix/Apple */
+hx_clog_add_event_log_sink("MyApp", NULL);       /* Windows    */
+hx_clog_add_network_sink(HX_CLOG_NET_TCP, "127.0.0.1", 5170, NULL);
+hx_clog_remove_sink(id);
+```
+
+#### 网络 sink
+
+```c
+typedef enum hx_clog_net_protocol { HX_CLOG_NET_TCP = 0, HX_CLOG_NET_UDP } hx_clog_net_protocol_t;
+
+int hx_clog_add_network_sink(hx_clog_net_protocol_t protocol,
+                             const char* host, unsigned short port,
+                             hx_clog_sink_id_t* out_id);
+```
+
+- **TCP** 保持连接并在失败后限速重连；**UDP** 无连接 fire-and-forget。
+- **首次写入时才惰性建连**，所以添加 sink 不会阻塞、collector 暂时不可用也不会导致 init 失败。
+- 链路断开期间丢行（由上游异步队列缓冲），并每个重试窗口最多通知一次 error handler。
+  建议与**异步模式**搭配，让 socket IO 跑在后台 worker 上。
+- 未启用 `HX_CLOG_ENABLE_NET` 编译时返回 `HX_CLOG_ERR_PLATFORM`。
 
 ### 13.2 自定义 sink
 
@@ -1341,34 +1478,63 @@ const char* hx_clog_strerror(int err);
 
 ## 19. 配置文件支持
 
-基础库不一定必须读取配置文件，但可以提供可选扩展。
+配置可以来自代码、INI 文件或环境变量。
 
-### 19.1 INI 示例
+### 19.1 INI 文件（`hx_clog_init_from_file`）
+
+```c
+if (hx_clog_init_from_file("hx_clog.ini") != HX_CLOG_OK) {
+    hx_clog_init(NULL); /* 回退到默认值 */
+}
+```
+
+文件用 `[hx_clog]` 段的 `key=value` 行。键对应配置字段；文件里没有的键保持默认值。
+`#` 和 `;` 为注释。尺寸值支持 `K`/`M`/`G` 后缀（二进制倍数）。
 
 ```ini
 [hx_clog]
-level=info
-mode=async
-log_dir=./logs
-file_name=app.log
-enable_console=true
-enable_file=true
-rotate_policy=size_and_time
-max_file_size=20971520
-max_backup_files=30
-flush_interval_ms=500
+level            = info          ; trace|debug|info|warn|error|fatal|off
+mode             = async         ; sync|async
+log_dir          = ./logs
+file_name        = app.log
+console          = true          ; 别名：enable_console
+file_output      = true          ; 别名：enable_file
+pattern          = %Y-%m-%d %H:%M:%S.%e [%l] %v%n
+format           = pattern       ; pattern|json
+rotate_policy    = size_and_time ; none|size|time|size_and_time
+max_file_size    = 20M           ; 20971520，或 20M / 1G / 64K
+max_backup_files = 30
+max_backup_days  = 14
+rotate_daily     = true
+overflow         = block         ; block|drop_new|drop_old
+async_queue_size = 8192
+date_subdir      = false
+crash            = false         ; 别名：enable_crash_handler
 ```
+
+可识别的键还包括 `logger`/`logger_name`、`color`、`max_compressed_files`、
+`rotate_interval_seconds`、`rotate_on_startup`、`rotate_align`、`async_batch_size`、
+`flush_interval_ms`。未知键为前向兼容会被忽略。
 
 ### 19.2 环境变量
 
-建议支持环境变量覆盖：
+叠加在传给 `hx_clog_init()` 的配置之上（即 env 覆盖代码）：
 
 | 变量 | 说明 |
 | --- | --- |
-| `HX_CLOG_LEVEL` | 覆盖日志级别 |
+| `HX_CLOG_LEVEL` | 覆盖日志级别（`trace`…`off`） |
 | `HX_CLOG_DIR` | 覆盖日志目录 |
 | `HX_CLOG_MODE` | `sync` 或 `async` |
-| `HX_CLOG_CONSOLE` | 是否开启控制台 |
+| `HX_CLOG_CONSOLE` | `1`/`true`/`yes` 开启控制台输出 |
+
+### 19.3 读回当前生效配置
+
+```c
+hx_clog_config_t cur;
+if (hx_clog_get_config(&cur) == HX_CLOG_OK) {
+    /* 反映 env 覆盖与 async->sync 回退；字符串字段在下次 init/reconfigure 前有效 */
+}
+```
 
 ## 20. 性能设计
 
@@ -1454,18 +1620,21 @@ flowchart TD
 
 ## 23. 与常见日志库能力对齐
 
-| 能力 | hx_clog 建议 | 说明 |
+| 能力 | hx_clog | 说明 |
 | --- | --- | --- |
-| 多级别日志 | 必须支持 | 日志库基础能力 |
-| 彩色控制台 | 支持 | 提升开发体验 |
-| 文件日志 | 必须支持 | 生产环境必需 |
-| 轮转日志 | 必须支持 | 对齐成熟日志库 |
-| 异步日志 | 支持 | 高频日志场景核心能力 |
-| 自定义 sink | 支持 | 方便扩展到 GUI、网络、数据库 |
-| crash 日志 | 强烈建议 | 相比普通日志库更有排障价值 |
-| C ABI | 默认支持 | 更适合底层库和跨语言 |
-| C++11 wrapper | 可选支持 | 增强 C++ 项目易用性 |
-| Header-only | 不建议作为默认 | crash、async、文件模块更适合编译库 |
+| 多级别 + 彩色控制台 | ✅ | 日志库基础能力 |
+| 文件 + 轮转日志 | ✅ | 大小 / 按天 / 间隔 / 启动；`.gz` 压缩 |
+| 异步日志 | ✅ | 有界队列，block/drop-new/drop-old 溢出策略 |
+| 编译期级别裁剪 | ✅ | `HX_CLOG_ACTIVE_LEVEL`（对应 spdlog `SPDLOG_ACTIVE_LEVEL`） |
+| 条件 / 采样宏 | ✅ | `HX_LOG_*_IF` / `HX_LOG_*_EVERY_N`（对应 glog `LOG_IF`/`LOG_EVERY_N`） |
+| 网络 sink（TCP/UDP） | ✅ | `hx_clog_add_network_sink` |
+| 命名 logger + 层级 | ✅ | 注册表 + 点分名级别继承 |
+| 文件 / 环境变量配置 | ✅ | INI（`hx_clog_init_from_file`）+ `HX_CLOG_*` 环境变量 |
+| 自定义 sink / formatter / allocator | ✅ | 扩展点 |
+| crash 日志 | ✅ | SEH / POSIX signal、调用栈、寄存器、最后 N 条、MiniDump |
+| C ABI + 可选 C++11 wrapper | ✅ | 跨语言友好；薄 RAII 层 |
+| JSON 输出 | ✅ | 内置 JSON formatter |
+| 结构化字段 / OTEL 导出 | ⬜ | 暂无（可用自定义 formatter 实现） |
 
 ## 24. 推荐默认配置
 
@@ -1483,14 +1652,20 @@ void hx_clog_config_default(hx_clog_config_t* config) {
     config->enable_crash_handler = 0;
     config->rotate_policy = HX_CLOG_ROTATE_BY_SIZE_AND_TIME;
     config->max_file_size = 10ULL * 1024ULL * 1024ULL;
-    config->max_backup_files = 10;
+    config->max_backup_files = -1;       /* -1 = 全部保留（不删除） */
+    config->max_compressed_files = -1;   /* -1 = 不按数量删除 .gz    */
     config->rotate_daily = 1;
     config->async_queue_size = 8192;
     config->async_batch_size = 64;
     config->flush_interval_ms = 1000;
+    config->overflow_policy = HX_CLOG_OVERFLOW_BLOCK;
+    config->format_mode = HX_CLOG_FORMAT_PATTERN;
     config->pattern = "%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n";
 }
 ```
+
+> 保留数量默认是**无限**（`-1`），`max_backup_files` 和 `max_compressed_files` 都是；
+> 设为正数即可限制磁盘占用。
 
 ## 25. 开发路线图
 
@@ -1520,13 +1695,20 @@ void hx_clog_config_default(hx_clog_config_t* config) {
 - Unix signal crash log。
 - 磁盘满、外部删除、reopen 等异常路径处理。
 
-### 第四阶段：可扩展
+### 第四阶段：可扩展 —— 1.3.0 已完成
 
-- 自定义 sink。
-- syslog / EventLog / Android logcat。
-- C++11 RAII wrapper。
-- 配置文件加载。
-- 性能 benchmark。
+- ✅ 自定义 sink；syslog / EventLog / Android logcat / Apple os_log。
+- ✅ C++11 RAII wrapper。
+- ✅ 配置文件加载（`hx_clog_init_from_file`）+ 环境变量覆盖。
+- ✅ TCP/UDP 网络 sink。
+- ✅ 编译期级别裁剪；条件 / 采样宏。
+- ✅ 命名 logger 注册表 + 点分名层级。
+
+### 第五阶段：未来
+
+- 令牌桶字节/速率限流（在 `EVERY_N` 之上）。
+- 结构化字段 / OpenTelemetry 导出。
+- 性能 benchmark 套件。
 
 ## 26. 最小可落地 API 清单
 

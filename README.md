@@ -19,11 +19,13 @@ A portable logging framework for **C / C++11** projects. The core public API kee
 | Optional wrapper | C++11 RAII wrapper |
 | Build system | CMake 3.16+ |
 | Supported platforms | Windows, Linux, macOS; CI smoke builds cover Android arm64-v8a / iOS arm64 |
-| Output targets | Console, File, Rotate File, Syslog, Windows Event Log, Android logcat, Apple os_log, custom callback |
+| Output targets | Console, File, Rotate File, **TCP/UDP network**, Syslog, Windows Event Log, Android logcat, Apple os_log, custom callback |
 | Write modes | Sync / async, with blocking, drop-new, and drop-old queue overflow strategies |
 | Formatting | pattern, custom formatter, JSON output |
+| Compile-time | `HX_CLOG_ACTIVE_LEVEL` cuts out levels below a floor (zero code, args not evaluated) |
 | Reliability | File rotation, startup rotation, interval rotation, crash logs, last-N log ring buffer |
-| Extension points | sink, formatter, allocator, named logger, thread-local context |
+| Configuration | runtime API, environment variables, and INI file (`hx_clog_init_from_file`) |
+| Extension points | sink, formatter, allocator, named-logger registry + hierarchy, thread-local context |
 
 ## CI/CD status
 
@@ -39,6 +41,91 @@ The current `master` branch is connected to GitHub Actions. The CI badge at the 
 | `packaging-smoke` | Linux Release install-package smoke test for exported CMake package and public headers |
 | `mobile-smoke` | Android arm64-v8a and iOS arm64 cross-compile smoke builds with crash handler enabled |
 | Linux syslog check | Builds the syslog sink path with `HX_CLOG_ENABLE_SYSLOG=ON` |
+
+## 1.3.0 change summary
+
+This release brings hx_clog to spdlog/glog-level feature coverage while keeping
+the C ABI additive and stable. It also folds in the fixes from the 1.2.0
+release-readiness audit (see [docs/audit](docs/audit/)).
+
+**New features**
+
+- **Compile-time level cutting** — define `HX_CLOG_ACTIVE_LEVEL` (with the
+  `HX_CLOG_LEVEL_NUM_*` constants). Any `HX_LOG_*` below that level expands to
+  `((void)0)`: no code is emitted and the arguments are never evaluated.
+
+  ```c
+  /* drop everything below INFO at compile time */
+  #define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_INFO
+  #include "hx_clog.h"
+  HX_LOG_DEBUG("x=%d", expensive());  /* compiled out: expensive() not called */
+  ```
+
+- **Conditional / sampling macros** (glog-style) — `HX_LOG_<LEVEL>_IF(cond, ...)`
+  and `HX_LOG_<LEVEL>_EVERY_N(n, ...)`:
+
+  ```c
+  HX_LOG_WARN_IF(rc != 0, "request failed: %d", rc);
+  HX_LOG_INFO_EVERY_N(1000, "processed %llu records", total);  /* 1st, then every 1000th */
+  ```
+
+- **TCP/UDP network sink** — `hx_clog_add_network_sink()` (gated by
+  `HX_CLOG_ENABLE_NET`, default on). TCP keeps a connection and reconnects
+  (rate-limited) after failures; UDP is fire-and-forget. The connection is
+  established lazily on the first write, so adding the sink never blocks and a
+  down collector does not fail init; lines are dropped while the link is down
+  (the upstream async queue does the buffering).
+
+  ```c
+  hx_clog_add_network_sink(HX_CLOG_NET_TCP, "logs.example.com", 5170, NULL);
+  ```
+
+- **INI config file** — `hx_clog_init_from_file("hx_clog.ini")`. The file has a
+  `[hx_clog]` section of `key=value` lines (keys mirror the config fields;
+  `#`/`;` start comments; sizes accept `K`/`M`/`G`). See [§19](#19-configuration-file-support).
+
+- **Named-logger registry + dotted hierarchy** — `hx_clog_logger_get(name)`
+  returns the existing logger or creates+registers one (no pointer to track);
+  `hx_clog_logger_find` / `hx_clog_logger_count` / `hx_clog_logger_drop_all`.
+  A new `"net.http"` inherits the level of its nearest registered ancestor
+  (`"net"`), and `hx_clog_set_level_for_prefix("net", level)` sets a whole
+  subtree at once.
+
+  ```c
+  hx_clog_set_level_for_prefix("net", HX_CLOG_LEVEL_DEBUG);
+  hx_clog_logger_t* http = hx_clog_logger_get("net.http"); /* inherits DEBUG */
+  HX_LOGGER_INFO(http, "connected");
+  ```
+
+- **Config read-back** — `hx_clog_get_config()` returns the currently-applied
+  configuration (reflecting env overrides and any async→sync fallback).
+- **atexit flush** — buffered/async lines are flushed automatically on normal
+  process exit, even without an explicit `hx_clog_shutdown()`.
+
+**Reliability fixes (from the 1.2.0 audit)**
+
+- Rotation cleanup strictly matches `<stem>.YYYY-MM-DD.<index>[.ext][.gz]`, so a
+  user file like `app.notes.log` sharing the stem/extension is never deleted;
+  the candidate set grows past 512.
+- Async `hx_clog_reconfigure()` is lossless under concurrent logging (no silent,
+  uncounted drops with `HX_CLOG_OVERFLOW_BLOCK`).
+- `hx_clog_get_stats()` is safe to call before init.
+- POSIX `fork()` safety via `pthread_atfork`; `sink_lock` is recursive so a
+  callback may re-enter the API; data races on the default logger name and the
+  async stat counters are fixed (TSan-clean).
+- Repeated `%v`/`%x` patterns expand fully instead of truncating below the line
+  cap; crash-ring and rotation OOM are reported through the error handler.
+- MinGW now requests the C99 `vsnprintf` (`__USE_MINGW_ANSI_STDIO`) and
+  serializes `localtime()`.
+
+**Packaging**
+
+- The shared library carries a `SOVERSION` and (on Unix) hidden visibility, so
+  its dynamic symbol table matches the public `HX_CLOG_API` surface. C11
+  `_Thread_local`/`<stdatomic.h>` fallbacks for non-MSVC/non-GCC compilers;
+  `-latomic` linked where needed. Added `CHANGELOG.md` and `SECURITY.md`.
+
+> All additions are append-only; the C ABI stays stable since 1.2.0.
 
 ## 1.1.0 change summary
 
@@ -75,13 +162,15 @@ The current `master` branch is connected to GitHub Actions. The CI badge at the 
 | C first | Public API uses a C ABI, making it easy to integrate from C, C++, Rust, Go, Python FFI, or extension layers |
 | Cross-platform | Windows / Linux / macOS CI coverage, with platform-specific sinks enabled through conditional compilation |
 | Sync and async | Small tools can use sync mode; services can use async queues to reduce business-thread I/O blocking |
-| Multiple loggers | Supports default logger, named loggers, independent logger levels, and `HX_LOG_NAMED_*` macros |
+| Multiple loggers | Default logger, named loggers, a registry (`hx_clog_logger_get`/`find`) and dotted-name level hierarchy, plus `HX_LOG_NAMED_*` / `HX_LOGGER_*` macros |
 | Context logs | Supports thread-local context; `%x` emits it in pattern mode and JSON carries it automatically |
 | Multiple formats | Built-in pattern and JSON formatters, plus custom formatter registration |
-| Multiple output targets | Console, file, rotating file, system logs, and custom callback sinks |
+| Multiple output targets | Console, file, rotating file, **TCP/UDP network**, system logs, and custom callback sinks |
+| Compile-time cutting | `HX_CLOG_ACTIVE_LEVEL` removes below-floor calls entirely (spdlog-style) |
+| Conditional logging | `HX_LOG_*_IF(cond, ...)` and `HX_LOG_*_EVERY_N(n, ...)` (glog-style) |
 | File rotation | Supports size, daily, interval, and startup rotation; old backups beyond the retention count can be compressed to `.gz` with zlib |
 | Crash logs | Supports SEH / POSIX signal capture, stack traces, register dumps, and recent-log protection |
-| Runtime configuration | Supports runtime changes to level, pattern, formatter, format mode, and rebuilding built-in sinks |
+| Configuration | Runtime API, INI file (`hx_clog_init_from_file`), environment variables, and read-back via `hx_clog_get_config` |
 
 ## Quick start
 
@@ -298,6 +387,10 @@ typedef enum hx_clog_rotate_policy {
 
 ### 5.2 Configuration structure
 
+Always zero-initialize via `hx_clog_config_default()` before setting fields; the
+struct only grows at the end, so this keeps source compatibility across
+versions. The full, authoritative field reference is in [docs/api.md](docs/api.md).
+
 ```c
 typedef struct hx_clog_config {
     const char* logger_name;       /* default "hx_clog" */
@@ -310,17 +403,38 @@ typedef struct hx_clog_config {
     int enable_file;               /* default 1 */
     int enable_color;              /* default 1, console only */
     int enable_crash_handler;      /* default 0, explicitly enabled */
+    int enable_syslog;             /* Unix/Apple syslog        */
+    int enable_event_log;          /* Windows Event Log        */
+    int enable_android_log;        /* Android logcat           */
+    int enable_apple_log;          /* Apple os_log             */
 
     hx_clog_rotate_policy_t rotate_policy;
-    unsigned long long max_file_size;  /* for example 10 * 1024 * 1024 */
-    int max_backup_files;              /* for example 10 */
-    int rotate_daily;                  /* whether to split by day */
+    unsigned long long max_file_size;     /* e.g. 10 * 1024 * 1024            */
+    int max_backup_files;                 /* newest plain backups kept; older
+                                           * ones are compressed. -1 = keep all
+                                           * (never compress/delete). Default -1 */
+    int max_backup_days;                  /* delete backups older than N days, 0=off */
+    int rotate_daily;                     /* split by day                     */
+    unsigned int rotate_interval_seconds; /* interval rotation, 0=off         */
+    int rotate_on_startup;                /* archive an existing log at init  */
 
-    unsigned int async_queue_size;     /* default 8192 */
-    unsigned int async_batch_size;     /* default 64 */
-    unsigned int flush_interval_ms;    /* default 1000 */
+    unsigned int async_queue_size;        /* default 8192                     */
+    unsigned int async_batch_size;        /* default 64                       */
+    unsigned int flush_interval_ms;       /* default 1000                     */
+    hx_clog_overflow_policy_t overflow_policy; /* BLOCK / DROP_NEW / DROP_OLD */
 
-    const char* pattern;               /* built-in default format */
+    const char* pattern;                  /* built-in default format          */
+    hx_clog_format_mode_t format_mode;    /* PATTERN (default) or JSON        */
+    hx_clog_formatter_t formatter;        /* optional custom formatter        */
+    void* formatter_user_data;
+    const char* system_logger_name;       /* ident/tag for system sinks       */
+
+    /* added in 1.1.0 */
+    int rotate_align;                     /* align interval rotation to the clock */
+    int max_compressed_files;             /* cap on .gz backups. -1 = unlimited
+                                           * (default); 0 = use max_backup_files  */
+    /* added in 1.2.0 */
+    int date_subdir;                      /* write under <log_dir>/<YYYY-MM-DD>/   */
 } hx_clog_config_t;
 ```
 
@@ -339,14 +453,20 @@ typedef struct hx_clog_config {
 ### 5.3 Lifecycle APIs
 
 ```c
-int hx_clog_init(const hx_clog_config_t* config);
+int  hx_clog_init(const hx_clog_config_t* config);
+int  hx_clog_init_from_file(const char* path);   /* init from an INI file (§19) */
 void hx_clog_shutdown(void);
-void hx_clog_flush(void);
+void hx_clog_flush(void);                         /* also runs at normal exit (atexit) */
+int  hx_clog_is_initialized(void);
+int  hx_clog_reconfigure(const hx_clog_config_t* config);
+int  hx_clog_get_config(hx_clog_config_t* out);   /* read back the applied config */
 
-void hx_clog_set_level(hx_clog_level_t level);
+void            hx_clog_set_level(hx_clog_level_t level);
 hx_clog_level_t hx_clog_get_level(void);
+int             hx_clog_set_pattern(const char* pattern);
+int             hx_clog_set_format_mode(hx_clog_format_mode_t mode);
 
-int hx_clog_reopen(void);  /* reopen after logrotate or external file move */
+int  hx_clog_reopen(void);  /* reopen after logrotate or external file move */
 ```
 
 ### 5.4 Write APIs
@@ -373,27 +493,37 @@ void hx_clog_writev(
 
 ### 5.5 Recommended macros
 
+All macros below carry `__FILE__`, `__LINE__`, and `__func__` automatically, and
+the same call syntax works on every compiler (including old MSVC).
+
 ```c
-#define HX_LOG_TRACE(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+/* default logger */
+HX_LOG_TRACE(fmt, ...);  HX_LOG_DEBUG(fmt, ...);  HX_LOG_INFO(fmt, ...);
+HX_LOG_WARN(fmt, ...);   HX_LOG_ERROR(fmt, ...);  HX_LOG_FATAL(fmt, ...);
 
-#define HX_LOG_DEBUG(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+/* named logger (by name) and by logger handle */
+HX_LOG_NAMED_INFO("net", "connected to %s", host);
+HX_LOGGER_INFO(logger, "connected");
 
-#define HX_LOG_INFO(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_INFO, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-
-#define HX_LOG_WARN(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_WARN, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-
-#define HX_LOG_ERROR(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-
-#define HX_LOG_FATAL(fmt, ...) \
-    hx_clog_write(HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+/* conditional / sampling (glog-style) */
+HX_LOG_WARN_IF(rc != 0, "failed: %d", rc);
+HX_LOG_INFO_EVERY_N(1000, "processed %llu", total);  /* 1st, then every 1000th */
 ```
 
-> Older Windows MSVC versions have inconsistent support for `##__VA_ARGS__`. In that case, provide extra helpers such as `HX_LOG_INFO0("message")` or use a C99/C++20-compatible macro strategy.
+**Compile-time level cutting.** Define `HX_CLOG_ACTIVE_LEVEL` to one of
+`HX_CLOG_LEVEL_NUM_TRACE … HX_CLOG_LEVEL_NUM_OFF` before including the header (or
+pass `-DHX_CLOG_ACTIVE_LEVEL=HX_CLOG_LEVEL_NUM_INFO`). Every macro below that
+level expands to `((void)0)` — no code is emitted and the arguments are never
+evaluated:
+
+```c
+#define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_INFO
+#include "hx_clog.h"
+HX_LOG_DEBUG("expensive: %d", compute());  /* compiled out entirely */
+```
+
+> The runtime `hx_clog_set_level()` filter and this compile-time floor are
+> independent: a call must pass **both** to be emitted.
 
 ## 6. C usage examples
 
@@ -1012,11 +1142,43 @@ typedef struct hx_clog_sink_vtable {
 | Console Sink | Output to stdout/stderr, colored by level |
 | File Sink | Output to a fixed file |
 | Rotate File Sink | Automatically rotate files |
+| Network Sink | Send each line to a TCP/UDP collector (`HX_CLOG_ENABLE_NET`) |
 | Crash Sink | Dedicated crash information output |
 | Callback Sink | User-defined handling, such as GUI, network, or database output |
 | Syslog Sink | Linux/macOS system log, optional |
 | EventLog Sink | Windows Event Log, optional |
 | Android Log Sink | Android logcat, optional |
+
+Sinks added after `hx_clog_init()` get a sink id; each can have its own minimum
+level (`hx_clog_set_sink_level`) and format override (`hx_clog_set_sink_pattern`).
+
+```c
+hx_clog_sink_id_t id = 0;
+hx_clog_add_callback_sink_ex(my_cb, user, &id);
+hx_clog_add_syslog_sink("myapp", NULL);          /* Unix/Apple */
+hx_clog_add_event_log_sink("MyApp", NULL);       /* Windows    */
+hx_clog_add_network_sink(HX_CLOG_NET_TCP, "127.0.0.1", 5170, NULL);
+hx_clog_remove_sink(id);
+```
+
+#### Network sink
+
+```c
+typedef enum hx_clog_net_protocol { HX_CLOG_NET_TCP = 0, HX_CLOG_NET_UDP } hx_clog_net_protocol_t;
+
+int hx_clog_add_network_sink(hx_clog_net_protocol_t protocol,
+                             const char* host, unsigned short port,
+                             hx_clog_sink_id_t* out_id);
+```
+
+- **TCP** keeps a connection and reconnects (rate-limited) after a failure;
+  **UDP** is connectionless fire-and-forget.
+- The connection is established **lazily on the first write**, so adding the sink
+  never blocks and a temporarily-down collector does not fail init.
+- While the link is down, lines are dropped (the upstream async queue provides
+  buffering) and the error handler is notified once per retry window. Pair the
+  network sink with **async mode** so socket I/O runs on the background worker.
+- Returns `HX_CLOG_ERR_PLATFORM` when built without `HX_CLOG_ENABLE_NET`.
 
 ### 13.2 Custom sink
 
@@ -1334,34 +1496,66 @@ const char* hx_clog_strerror(int err);
 
 ## 19. Configuration file support
 
-The base library does not necessarily need to read configuration files, but an optional extension can be provided.
+Configuration can come from code, an INI file, or environment variables.
 
-### 19.1 INI example
+### 19.1 INI file (`hx_clog_init_from_file`)
+
+```c
+if (hx_clog_init_from_file("hx_clog.ini") != HX_CLOG_OK) {
+    hx_clog_init(NULL); /* fall back to defaults */
+}
+```
+
+The file has a `[hx_clog]` section of `key=value` lines. Keys mirror the config
+fields; any key absent from the file keeps its default. `#` and `;` start
+comments. Size values accept `K`/`M`/`G` suffixes (binary multiples).
 
 ```ini
 [hx_clog]
-level=info
-mode=async
-log_dir=./logs
-file_name=app.log
-enable_console=true
-enable_file=true
-rotate_policy=size_and_time
-max_file_size=20971520
-max_backup_files=30
-flush_interval_ms=500
+level            = info          ; trace|debug|info|warn|error|fatal|off
+mode             = async         ; sync|async
+log_dir          = ./logs
+file_name        = app.log
+console          = true          ; aliases: enable_console
+file_output      = true          ; aliases: enable_file
+pattern          = %Y-%m-%d %H:%M:%S.%e [%l] %v%n
+format           = pattern       ; pattern|json
+rotate_policy    = size_and_time ; none|size|time|size_and_time
+max_file_size    = 20M           ; 20971520, or 20M / 1G / 64K
+max_backup_files = 30
+max_backup_days  = 14
+rotate_daily     = true
+overflow         = block         ; block|drop_new|drop_old
+async_queue_size = 8192
+date_subdir      = false
+crash            = false         ; aliases: enable_crash_handler
 ```
+
+Recognized keys also include `logger`/`logger_name`, `color`,
+`max_compressed_files`, `rotate_interval_seconds`, `rotate_on_startup`,
+`rotate_align`, `async_batch_size`, and `flush_interval_ms`. Unknown keys are
+ignored for forward compatibility.
 
 ### 19.2 Environment variables
 
-Recommended environment-variable overrides:
+Applied on top of the config passed to `hx_clog_init()` (so env wins over code):
 
 | Variable | Description |
 | --- | --- |
-| `HX_CLOG_LEVEL` | Override log level |
+| `HX_CLOG_LEVEL` | Override log level (`trace`…`off`) |
 | `HX_CLOG_DIR` | Override log directory |
 | `HX_CLOG_MODE` | `sync` or `async` |
-| `HX_CLOG_CONSOLE` | Whether console output is enabled |
+| `HX_CLOG_CONSOLE` | `1`/`true`/`yes` to enable console output |
+
+### 19.3 Reading the active configuration back
+
+```c
+hx_clog_config_t cur;
+if (hx_clog_get_config(&cur) == HX_CLOG_OK) {
+    /* reflects env overrides and any async->sync fallback; string fields are
+     * valid until the next init/reconfigure */
+}
+```
 
 ## 20. Performance design
 
@@ -1447,18 +1641,21 @@ flowchart TD
 
 ## 23. Alignment with common logging libraries
 
-| Capability | hx_clog recommendation | Description |
+| Capability | hx_clog | Notes |
 | --- | --- | --- |
-| Multiple levels | Required | Basic logging-library capability |
-| Colored console | Supported | Improves development experience |
-| File logging | Required | Required in production |
-| Rotating logs | Required | Aligns with mature logging libraries |
-| Async logging | Supported | Core capability for high-frequency logging |
-| Custom sink | Supported | Easy extension to GUI, network, database |
-| Crash logs | Strongly recommended | More valuable for troubleshooting than ordinary logging alone |
-| C ABI | Supported by default | Better for low-level libraries and cross-language use |
-| C++11 wrapper | Optional | Improves ergonomics for C++ projects |
-| Header-only | Not recommended by default | crash, async, and file modules are better as a compiled library |
+| Multiple levels + colored console | ✅ | Basic logging-library capability |
+| File + rotating logs | ✅ | Size / daily / interval / startup; `.gz` compression |
+| Async logging | ✅ | Bounded queue, block/drop-new/drop-old overflow |
+| Compile-time level cutting | ✅ | `HX_CLOG_ACTIVE_LEVEL` (spdlog `SPDLOG_ACTIVE_LEVEL`) |
+| Conditional / sampling macros | ✅ | `HX_LOG_*_IF` / `HX_LOG_*_EVERY_N` (glog `LOG_IF`/`LOG_EVERY_N`) |
+| Network sink (TCP/UDP) | ✅ | `hx_clog_add_network_sink` |
+| Named loggers + hierarchy | ✅ | Registry + dotted-name level inheritance |
+| File / env configuration | ✅ | INI (`hx_clog_init_from_file`) + `HX_CLOG_*` env vars |
+| Custom sink / formatter / allocator | ✅ | Extension points |
+| Crash logs | ✅ | SEH / POSIX signals, stack, registers, last-N ring, MiniDump |
+| C ABI + optional C++11 wrapper | ✅ | Cross-language friendly; thin RAII layer |
+| JSON output | ✅ | Built-in JSON formatter |
+| Structured fields / OTEL export | ⬜ | Not yet (use a custom formatter) |
 
 ## 24. Recommended default configuration
 
@@ -1476,14 +1673,20 @@ void hx_clog_config_default(hx_clog_config_t* config) {
     config->enable_crash_handler = 0;
     config->rotate_policy = HX_CLOG_ROTATE_BY_SIZE_AND_TIME;
     config->max_file_size = 10ULL * 1024ULL * 1024ULL;
-    config->max_backup_files = 10;
+    config->max_backup_files = -1;       /* -1 = keep all backups (never delete) */
+    config->max_compressed_files = -1;   /* -1 = never delete .gz by count       */
     config->rotate_daily = 1;
     config->async_queue_size = 8192;
     config->async_batch_size = 64;
     config->flush_interval_ms = 1000;
+    config->overflow_policy = HX_CLOG_OVERFLOW_BLOCK;
+    config->format_mode = HX_CLOG_FORMAT_PATTERN;
     config->pattern = "%Y-%m-%d %H:%M:%S.%e [%l] [tid:%t] %s:%# %!() - %v%n";
 }
 ```
+
+> Retention defaults to **unlimited** (`-1`) for both `max_backup_files` and
+> `max_compressed_files` — set them to a positive count to bound disk usage.
 
 ## 25. Development roadmap
 
@@ -1513,13 +1716,20 @@ void hx_clog_config_default(hx_clog_config_t* config) {
 - Unix signal crash log.
 - Exceptional-path handling such as disk full, external deletion, and reopen.
 
-### Phase 4: Extensible
+### Phase 4: Extensible — done in 1.3.0
 
-- Custom sink.
-- syslog / EventLog / Android logcat.
-- C++11 RAII wrapper.
-- Configuration file loading.
-- Performance benchmark.
+- ✅ Custom sink; syslog / EventLog / Android logcat / Apple os_log.
+- ✅ C++11 RAII wrapper.
+- ✅ Configuration file loading (`hx_clog_init_from_file`) + env overrides.
+- ✅ TCP/UDP network sink.
+- ✅ Compile-time level cutting; conditional / sampling macros.
+- ✅ Named-logger registry + dotted-name hierarchy.
+
+### Phase 5: Future
+
+- Token-bucket byte/rate limiting (beyond `EVERY_N`).
+- Structured-field / OpenTelemetry export.
+- Performance benchmark suite.
 
 ## 26. Minimal shippable API list
 

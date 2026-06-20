@@ -11,14 +11,18 @@
 ```c
 void hx_clog_config_default(hx_clog_config_t* config);
 int  hx_clog_init(const hx_clog_config_t* config);   /* HX_CLOG_OK on success */
+int  hx_clog_init_from_file(const char* path);        /* 从 INI 文件初始化 */
 void hx_clog_shutdown(void);                          /* drains async + closes sinks */
-void hx_clog_flush(void);
+void hx_clog_flush(void);                             /* 正常退出时也会执行（atexit） */
 int  hx_clog_is_initialized(void);
 int  hx_clog_reconfigure(const hx_clog_config_t* config);
+int  hx_clog_get_config(hx_clog_config_t* out_config); /* 读回当前生效配置 */
 int  hx_clog_reopen(void);                            /* after logrotate / file move */
 ```
 
 先调用 `hx_clog_config_default()`，再覆盖关心的字段，然后调用 `hx_clog_init()`。`hx_clog_shutdown()` 调用一次是安全的；额外调用是 no-op。异步模式下，shutdown 总会先 drain 队列再关闭文件。
+
+`hx_clog_init_from_file()` 解析一个 INI 文件（`[hx_clog]` 段的 `key=value` 行；键对应配置字段；`#`/`;` 注释；尺寸支持 `K`/`M`/`G`）后调用 `hx_clog_init()`，文件里没有的键保持默认值（可识别的键见 README §19）。`hx_clog_get_config()` 把当前生效配置（反映环境变量覆盖与 async→sync 回退）拷贝到 `out_config`，返回的字符串指针在下次 init/reconfigure 前有效。由于 `hx_clog_flush()` 也通过 `atexit()` 注册，正常退出时即使没显式调用 `hx_clog_shutdown()` 也会冲刷异步/缓冲日志。
 
 `hx_clog_reconfigure()` 会更新 level、默认 logger 名称、format mode、pattern/custom formatter、mode 和内置 sinks，同时保留 callback sinks。自 1.1.0 起，file sink 切换是 **fail-safe** 的：先创建新 file sink，如果失败（错误的 `log_dir`、无权限等），函数返回 `HX_CLOG_ERR_OPEN_FILE_FAILED`，且 **所有旧 sink 保持不变**，因此新的日志目录拼错不会让文件输出静默失效。
 
@@ -62,6 +66,24 @@ HX_LOG_ERROR(fmt, ...);
 HX_LOG_FATAL(fmt, ...);
 ```
 
+每个级别都有**条件 / 采样**变体（glog 风格）：
+
+```c
+HX_LOG_WARN_IF(cond, fmt, ...);       /* 仅当 cond 为真时输出           */
+HX_LOG_INFO_EVERY_N(n, fmt, ...);     /* 第 1 次，之后每 n 次（按调用点计数，
+                                       *  并发下为近似值）*/
+```
+
+**编译期级别裁剪。** 在 include 头文件之前定义 `HX_CLOG_ACTIVE_LEVEL` 为
+`HX_CLOG_LEVEL_NUM_TRACE … HX_CLOG_LEVEL_NUM_OFF` 之一（或 `-DHX_CLOG_ACTIVE_LEVEL=...`）。
+门槛以下的宏（含其 `_IF` / `_EVERY_N` 变体）展开为 `((void)0)`：不生成代码，参数和条件
+也不会被求值。这与运行时 `hx_clog_set_level()` 过滤相互独立——一条日志必须同时通过两者。
+
+```c
+#define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_INFO
+#include "hx_clog.h"
+```
+
 更底层的入口：
 
 ```c
@@ -90,6 +112,23 @@ HX_LOGGER_ERROR(logger, "worker failed: %d", rc);
 ```
 
 命名 logger 共享进程级 sinks，但拥有自己的 logger/category 名称和最低级别。全局 level 仍然是进程级下限。
+
+### 注册表与点分名层级
+
+```c
+hx_clog_logger_t* hx_clog_logger_get(const char* name);   /* 取或创建+注册 */
+hx_clog_logger_t* hx_clog_logger_find(const char* name);  /* 不存在返回 NULL */
+unsigned int      hx_clog_logger_count(void);
+int  hx_clog_set_level_for_prefix(const char* prefix, hx_clog_level_t level);
+void hx_clog_logger_drop_all(void);
+```
+
+`hx_clog_logger_get()` 返回已有的同名 logger，或创建并**注册**一个新的——无需保存指针。
+新建的 `"a.b.c"` 继承最近已注册祖先（`"a.b"`，再 `"a"`）的级别，否则用全局级别。
+`hx_clog_set_level_for_prefix()` 设置前缀 logger 及其所有现有后代（`"net"` 影响 `"net"`、
+`"net.tcp"` …），并创建前缀 logger，使**之后**创建的后代也能继承。注册表 logger 一直存活
+到 `hx_clog_logger_drop_all()` 或进程退出——**不要**把它们传给 `hx_clog_logger_destroy()`
+（那只用于 `hx_clog_logger_create()` 创建的 logger）。
 
 线程本地 context：
 
@@ -172,6 +211,20 @@ int hx_clog_add_apple_log_sink(const char* subsystem, hx_clog_sink_id_t* out_id)
 ```
 
 不支持的平台/系统 sink 组合返回 `HX_CLOG_ERR_PLATFORM`。Unix/Apple 目标上，`HX_CLOG_ENABLE_SYSLOG=ON` 时会编译 syslog 支持。
+
+网络 sink（`HX_CLOG_ENABLE_NET`，默认开）：
+
+```c
+typedef enum hx_clog_net_protocol { HX_CLOG_NET_TCP = 0, HX_CLOG_NET_UDP } hx_clog_net_protocol_t;
+int hx_clog_add_network_sink(hx_clog_net_protocol_t protocol, const char* host,
+                             unsigned short port, hx_clog_sink_id_t* out_id);
+```
+
+把每一行发送到 `host:port`。TCP 保持连接并在失败后限速重连；UDP fire-and-forget。
+首次写入时才惰性建连，所以添加 sink 不会阻塞、collector 不可用也不会导致 init 失败；
+链路断开期间丢行（由上游异步队列缓冲），并每个重试窗口最多通知一次 error handler。
+建议与异步模式搭配，让 socket IO 跑在后台 worker 上。未启用 `HX_CLOG_ENABLE_NET` 时返回
+`HX_CLOG_ERR_PLATFORM`。
 
 ## 轮转
 

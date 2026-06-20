@@ -11,12 +11,25 @@ Build and CI notes are in [ci.md](ci.md).
 ```c
 void hx_clog_config_default(hx_clog_config_t* config);
 int  hx_clog_init(const hx_clog_config_t* config);   /* HX_CLOG_OK on success */
+int  hx_clog_init_from_file(const char* path);        /* init from an INI file */
 void hx_clog_shutdown(void);                          /* drains async + closes sinks */
-void hx_clog_flush(void);
+void hx_clog_flush(void);                             /* also runs at normal exit (atexit) */
 int  hx_clog_is_initialized(void);
 int  hx_clog_reconfigure(const hx_clog_config_t* config);
+int  hx_clog_get_config(hx_clog_config_t* out_config); /* read back applied config */
 int  hx_clog_reopen(void);                            /* after logrotate / file move */
 ```
+
+`hx_clog_init_from_file()` parses an INI file (a `[hx_clog]` section of
+`key=value` lines; keys mirror the config fields; `#`/`;` comments; sizes accept
+`K`/`M`/`G`) and calls `hx_clog_init()`. Missing keys keep their defaults. See
+the README §19 for the recognized keys.
+
+`hx_clog_get_config()` copies the currently-applied configuration (reflecting
+environment overrides and any async→sync fallback) into `out_config`; the
+returned string pointers stay valid until the next init/reconfigure. Since
+`hx_clog_flush()` is also registered with `atexit()`, async/buffered lines are
+flushed on normal process exit even without an explicit `hx_clog_shutdown()`.
 
 Call `hx_clog_config_default()` first, override the fields you care about, then
 `hx_clog_init()`. `hx_clog_shutdown()` is safe to call once; extra calls are
@@ -76,6 +89,27 @@ HX_LOG_ERROR(fmt, ...);
 HX_LOG_FATAL(fmt, ...);
 ```
 
+**Conditional / sampling** variants exist for every level (glog-style):
+
+```c
+HX_LOG_WARN_IF(cond, fmt, ...);       /* log only when cond is true       */
+HX_LOG_INFO_EVERY_N(n, fmt, ...);     /* 1st call, then every n-th at the site
+                                       * (per-site counter; approximate under
+                                       *  concurrency) */
+```
+
+**Compile-time level cutting.** Define `HX_CLOG_ACTIVE_LEVEL` to one of the
+`HX_CLOG_LEVEL_NUM_TRACE … HX_CLOG_LEVEL_NUM_OFF` constants before including the
+header (or via `-DHX_CLOG_ACTIVE_LEVEL=...`). Any macro below that level —
+including its `_IF` / `_EVERY_N` variants — expands to `((void)0)`, so no code is
+emitted and the arguments (and condition) are never evaluated. This is
+independent of the runtime `hx_clog_set_level()` filter: a call must pass both.
+
+```c
+#define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_INFO
+#include "hx_clog.h"
+```
+
 Lower-level entry points:
 
 ```c
@@ -105,6 +139,27 @@ HX_LOGGER_ERROR(logger, "worker failed: %d", rc);
 
 Named loggers share the process-wide sinks but carry their own logger/category
 name and minimum level. The global level remains a process-wide floor.
+
+### Registry and dotted-name hierarchy
+
+```c
+hx_clog_logger_t* hx_clog_logger_get(const char* name);   /* get-or-create + register */
+hx_clog_logger_t* hx_clog_logger_find(const char* name);  /* NULL if absent */
+unsigned int      hx_clog_logger_count(void);
+int  hx_clog_set_level_for_prefix(const char* prefix, hx_clog_level_t level);
+void hx_clog_logger_drop_all(void);
+```
+
+`hx_clog_logger_get()` returns the existing logger of that name or creates and
+**registers** a new one, so there is no pointer to keep track of. A new logger
+named `"a.b.c"` inherits the level of its nearest registered ancestor (`"a.b"`,
+then `"a"`), else the global level. `hx_clog_set_level_for_prefix()` sets the
+prefix logger and all current descendants (`"net"` affects `"net"`, `"net.tcp"`,
+…) and creates the prefix logger so descendants created **later** inherit too.
+
+Registry loggers live until `hx_clog_logger_drop_all()` or process exit — do
+**not** pass them to `hx_clog_logger_destroy()` (that is only for loggers you
+created with `hx_clog_logger_create()`).
 
 Thread-local context:
 
@@ -196,6 +251,22 @@ int hx_clog_add_apple_log_sink(const char* subsystem, hx_clog_sink_id_t* out_id)
 Unsupported platform/system sink combinations return `HX_CLOG_ERR_PLATFORM`.
 On Unix/Apple targets, syslog support is compiled when
 `HX_CLOG_ENABLE_SYSLOG=ON`.
+
+Network sink (`HX_CLOG_ENABLE_NET`, default on):
+
+```c
+typedef enum hx_clog_net_protocol { HX_CLOG_NET_TCP = 0, HX_CLOG_NET_UDP } hx_clog_net_protocol_t;
+int hx_clog_add_network_sink(hx_clog_net_protocol_t protocol, const char* host,
+                             unsigned short port, hx_clog_sink_id_t* out_id);
+```
+
+Sends each formatted line to `host:port`. TCP keeps a connection and reconnects
+(rate-limited) after failures; UDP is fire-and-forget. The connection is
+established lazily on the first write, so adding the sink never blocks and a down
+collector does not fail init; lines are dropped while the link is down (the
+upstream async queue provides buffering) and the error handler is notified once
+per retry window. Pair it with async mode so socket I/O runs on the background
+worker. Returns `HX_CLOG_ERR_PLATFORM` when built without `HX_CLOG_ENABLE_NET`.
 
 ## Rotation
 
