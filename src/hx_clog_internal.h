@@ -1,7 +1,32 @@
 /*
- * hx_clog - internal shared declarations.
+ * hx_clog - internal shared declarations ("the contract header").
  *
- * Not installed. Used to share state and helpers between translation units.
+ * Not installed. Included by every C file under src/ (and it includes the
+ * public hx_clog.h, so internal code always sees the same declarations
+ * consumers do). Everything that must be visible across translation units
+ * but is not public API lives here:
+ *
+ *   - MinGW printf conformance (__USE_MINGW_ANSI_STDIO must be latched
+ *     before any system header; msvcrt's vsnprintf does not follow C99)
+ *   - platform detection (HX_PLATFORM_WINDOWS/APPLE/ANDROID/UNIX/POSIX) and
+ *     the Windows vs pthread system-header selection
+ *   - tunables: stack buffer size, the 512 KB line cap (removable via
+ *     HX_CLOG_UNLIMITED_LINE), max sinks, path max, crash ring geometry
+ *   - the allocator indirection hx_clog__malloc/__free — every allocation in
+ *     the library routes through it so a user allocator is honoured globally
+ *   - threading primitives behind one API: mutex (incl. recursive) over
+ *     CRITICAL_SECTION/pthread_mutex, condition variables with MONOTONIC
+ *     timeouts, thread spawn/join
+ *   - platform helpers: pid/tid, sleep, millisecond wall clock, localtime
+ *     (thread-safe per platform), UTF-8 paths for all file system calls
+ *     (UTF-16 conversion happens at the Windows boundary)
+ *   - the sink vtable + struct layout and the built-in sink factories
+ *   - cross-module entry points: the format engine, the crash ring buffer,
+ *     rotation, the async engine, and the core emit/flush/error hooks the
+ *     async worker and the sinks call back into
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #ifndef HX_CLOG_INTERNAL_H
 #define HX_CLOG_INTERNAL_H

@@ -10,6 +10,7 @@
  *         every attempted write is delivered (no silent, uncounted drops).
  *
  * Driven entirely through the public API, per the project's testing rules. */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

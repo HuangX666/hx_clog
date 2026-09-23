@@ -1,5 +1,6 @@
 /* hx_clog test: named-logger registry (get/find/count/drop_all) and the
  * dotted-name hierarchy (prefix level set + create-time inheritance). */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

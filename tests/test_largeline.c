@@ -10,6 +10,7 @@
  * When built with HX_CLOG_UNLIMITED_LINE, the 700 KB message is delivered
  * in full too.
  */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

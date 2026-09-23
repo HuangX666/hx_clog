@@ -1,4 +1,5 @@
 /* hx_clog example: C++11 RAII wrapper. */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog_cpp.hpp"
 
 int main() {

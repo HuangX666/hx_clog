@@ -1,9 +1,47 @@
 /*
- * hx_clog - core.
+ * hx_clog - core: process-wide state, lifecycle and the synchronous write
+ * path. The heart of the library (largest translation unit).
  *
- * Owns global logger state, level filtering, the synchronous write path,
- * sink management, statistics, the crash ring buffer, and all platform /
- * threading / allocator helpers shared across the library.
+ * Owns and implements:
+ *
+ *   - g_core, the process-wide singleton: global level, sync/async mode, the
+ *     sink table, format fields (pattern / JSON mode / custom formatter),
+ *     statistics and the default logger. Guarded by init_lock (lifecycle),
+ *     sink_lock (sink table + format fields + all synchronous sink writes;
+ *     RECURSIVE so user callbacks running under it may re-enter the API),
+ *     stats_lock and logger_lock
+ *   - lifecycle: hx_clog_init / hx_clog_init_from_file (INI keys + env
+ *     overrides) / hx_clog_reconfigure / hx_clog_shutdown / the atexit
+ *     flush hook; one-time init via InitOnce (Windows) or pthread_once;
+ *     POSIX fork safety via pthread_atfork handlers that take every global
+ *     lock in a fixed order across fork() so the child inherits them valid
+ *     and unlocked
+ *   - the write path: atomic level filtering BEFORE any formatting work,
+ *     vsnprintf into a 1 KB stack buffer with an exact-size heap retry
+ *     clamped by the line cap, a per-thread format cache (TLS, invalidated
+ *     cheaply via an atomic format-generation counter), per-sink format
+ *     overrides rendered as extra variants, duplicate suppression, then
+ *     dispatch to hx_core_emit_to_sinks (synchronous, under sink_lock) or
+ *     the async engine (hx_clog_async.c); if the async engine is mid-
+ *     teardown, producers fall back to a direct synchronous write so the
+ *     BLOCK overflow policy stays lossless
+ *   - the crash ring buffer ("last N logs"): a fixed, pre-allocated ring
+ *     fed by every formatted line, dumped with raw write() only from crash
+ *     contexts (see hx_clog_crash.c)
+ *   - the named-logger registry with dotted-hierarchy level inheritance
+ *   - the platform layer every other module uses: mutex/condvar/thread
+ *     wrappers, atomics, pid/tid, millisecond clock, localtime (serialized
+ *     under a lock on MinGW, localtime_s/localtime_r elsewhere), UTF-8 <->
+ *     UTF-16 conversion and the wide-character file system operations
+ *   - the crash API stubs used when HX_CLOG_ENABLE_CRASH is compiled out,
+ *     so the exported ABI is identical in both configurations
+ *
+ * Error-reporting contract: internal failures are surfaced through the
+ * user-installable error handler (hx_core_report_error) — the library never
+ * prints on its own.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #include "hx_clog_internal.h"
 
@@ -1173,18 +1211,33 @@ int hx_clog_set_error_handler(hx_clog_error_handler_t handler, void* user_data) 
     return HX_CLOG_OK;
 }
 
+/* Full barrier on both sides of the crash-callback publication: without it,
+ * compiler/CPU reordering could hand the crash handler a new callback paired
+ * with the previous user_data (or a torn no-callback window). */
+#if defined(HX_PLATFORM_WINDOWS)
+#  define HX_CRASH_CB_BARRIER() MemoryBarrier()
+#elif defined(__GNUC__) || defined(__clang__)
+#  define HX_CRASH_CB_BARRIER() __sync_synchronize()
+#else
+#  define HX_CRASH_CB_BARRIER() do { } while (0)
+#endif
+
 hx_clog_crash_callback_t hx_crash_get_callback(void** user_data_out) {
+    hx_clog_crash_callback_t cb = g_crash_cb; /* consume the flag first */
+    HX_CRASH_CB_BARRIER();
     if (user_data_out) {
         *user_data_out = g_crash_cb_ud;
     }
-    return g_crash_cb;
+    return cb;
 }
 
 int hx_clog_set_crash_callback(hx_clog_crash_callback_t cb, void* user_data) {
-    /* set ud first so a concurrent crash never sees the new cb with the old
-     * user_data */
+    /* Detach first so a concurrent crash never invokes a half-updated pair,
+     * then publish user_data before the callback, each step barrier-ordered. */
     g_crash_cb = NULL;
+    HX_CRASH_CB_BARRIER();
     g_crash_cb_ud = user_data;
+    HX_CRASH_CB_BARRIER();
     g_crash_cb = cb;
     return HX_CLOG_OK;
 }
@@ -2065,6 +2118,19 @@ int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config) {
 }
 void hx_clog_uninstall_crash_handler(void) {
 }
+int hx_clog_crash_set_option(int option, long value) {
+    (void)option;
+    (void)value;
+    return HX_CLOG_ERR_PLATFORM;
+}
+int hx_clog_wer_local_dumps_enable(const char* folder, int dump_type,
+                                   int max_count) {
+    (void)folder; (void)dump_type; (void)max_count;
+    return HX_CLOG_ERR_PLATFORM;
+}
+int hx_clog_wer_local_dumps_disable(void) {
+    return HX_CLOG_ERR_PLATFORM;
+}
 #endif
 
 /* =========================================================================
@@ -2096,8 +2162,8 @@ static unsigned int format_line(const hx_clog_record_t* rec,
 }
 
 /* Format a record with stack-first / heap-retry semantics. On return
- * *line_out/*len_out describe the formatted line; *heap_out (if non-NULL)
- * must be freed by the caller. */
+ * *line_out and *len_out describe the formatted line; *heap_out (if
+ * non-NULL) must be freed by the caller. */
 static void format_with_retry(const hx_clog_record_t* rec,
                               const char* pattern,
                               hx_clog_format_mode_t mode,

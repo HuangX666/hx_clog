@@ -1,4 +1,5 @@
 /* hx_clog test: size-based rotation produces backups and counts them. */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

@@ -3,6 +3,7 @@
  * Binds a UDP receiver on an ephemeral 127.0.0.1 port, points a UDP network
  * sink at it, logs a line, and verifies the bytes arrive. Only built when
  * HX_CLOG_ENABLE_NET is on. */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

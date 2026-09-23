@@ -6,9 +6,18 @@
  * forget. Connection is established lazily on the first write, so adding the
  * sink never blocks and a temporarily-down collector does not fail init.
  *
+ * Runs UNDER the core sink_lock like every other sink (see hx_clog_core.c),
+ * which couples its latencies to the whole logging path: connect() is
+ * bounded by a select() timeout, but steady-state send() is currently
+ * unbounded and DNS (getaddrinfo) is bounded only by the resolver — both are
+ * open audit findings (P0-1 / P1-2 in docs/audit/).
+ *
  * Built only when HX_CLOG_ENABLE_NET is defined. Lines are dropped while the
  * link is down (the async queue upstream provides the real buffering); drops
  * are reported through the error handler at most once per retry window.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #include "hx_clog_internal.h"
 

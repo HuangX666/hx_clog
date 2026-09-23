@@ -6,6 +6,44 @@ All notable changes to hx_clog are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Windows crash-handler hardening** (partial mitigation for the "memory
+  corruption produces no dump" class of failures):
+  - Re-entrancy guard in the SEH filter: a nested fault while writing the
+    report no longer recurses.
+  - Static artifact name buffers, so `EXCEPTION_STACK_OVERFLOW` can still
+    write a report without ~3 KB of path buffers on the exhausted stack.
+  - dbghelp (`SymInitialize` + a throwaway stack walk) is warmed up at
+    install time instead of running for the first time inside the exception
+    filter.
+  - `abort()`/SIGABRT, CRT invalid parameters and C++ pure virtual calls are
+    funnelled into the filter as custom exceptions — they terminate without
+    SEH dispatch and previously produced neither report nor dump.
+  - Crash artifacts use UTC timestamps computed without `localtime` (whose
+    MinGW path takes a lock the crashing thread may already hold), unique
+    `crash_<date>_<time>_pid<pid>_<seq>` names (same-second crashes no longer
+    overwrite each other), and minidump failures are recorded in the report.
+  - After writing its artifacts the filter hands the exception to Windows
+    Error Reporting (`EXCEPTION_CONTINUE_SEARCH`) so an out-of-process dump
+    path stays alive; disable with the new `WER_PASSTHROUGH` option.
+  - New APIs: `hx_clog_crash_set_option()` (`EXTRA_HANDLERS` /
+    `WER_PASSTHROUGH` / `MINIDUMP_TYPE` with a large "corruption-analysis"
+    preset) and `hx_clog_wer_local_dumps_enable()` / `_disable()` — opt-in
+    per-app WER LocalDumps registration under HKCU, the only reliable dump
+    source for fail-fast terminations (heap metadata corruption, `/GS` stack
+    cookie) that no in-process handler can observe. The registration creates
+    the dump folder up front and forces a hive flush (`RegFlushKey`) so it
+    survives an immediate power loss; a partially-written registration
+    degrades to WER's documented defaults instead of failing.
+- Detailed copyright and per-file purpose headers on every source file
+  (library files describe their responsibilities and locking/ABI contracts;
+  tests and examples carry a compact copyright line).
+
+### Fixed
+- Crash callback publication (`hx_clog_set_crash_callback`) now uses full
+  barriers on both sides, so a concurrent crash can no longer observe a new
+  callback paired with the previous user data (audit P2-13).
+
 ## [1.3.0] - 2026-06-20
 
 ### Added

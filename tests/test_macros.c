@@ -1,5 +1,6 @@
 /* hx_clog test: compile-time level cutting (HX_CLOG_ACTIVE_LEVEL) and the
  * conditional macros HX_LOG_*_IF / HX_LOG_*_EVERY_N. */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 
 /* Cut everything below INFO at compile time *before* including the header. */
 #define HX_CLOG_ACTIVE_LEVEL HX_CLOG_LEVEL_NUM_INFO

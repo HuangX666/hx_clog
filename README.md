@@ -1062,7 +1062,24 @@ typedef struct hx_clog_crash_config {
 
 int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config);
 void hx_clog_uninstall_crash_handler(void);
+
+/* 1.4.0 runtime options (Windows-focused; accepted and ignored on POSIX) */
+int hx_clog_crash_set_option(int option, long value);
+/* 1.4.0 (Windows): opt-in WER LocalDumps registration under HKCU — the only
+ * way to obtain dumps for fail-fast terminations such as heap-metadata
+ * corruption, which no in-process handler can observe. */
+int hx_clog_wer_local_dumps_enable(const char* folder, int dump_type,
+                                   int max_count);
+int hx_clog_wer_local_dumps_disable(void);
 ```
+
+Options for `hx_clog_crash_set_option`:
+
+| Option | Description |
+| --- | --- |
+| `HX_CLOG_CRASH_OPT_EXTRA_HANDLERS` | Also capture `abort()`/SIGABRT, CRT invalid parameters, and C++ pure virtual calls on Windows (they terminate without SEH and would otherwise leave nothing). Default on. |
+| `HX_CLOG_CRASH_OPT_WER_PASSTHROUGH` | After writing the report and minidump, hand the exception to Windows Error Reporting so an out-of-process dump is still possible. Default on. |
+| `HX_CLOG_CRASH_OPT_MINIDUMP_TYPE` | `0` minimal, `1` default, `2` large (data segments + handles + thread info — best for memory-corruption analysis), `3` full memory. |
 
 Suggested fields:
 
@@ -1111,9 +1128,32 @@ Windows can optionally support `MiniDumpWriteDump`:
 
 ```text
 crash/
-├── crash_20260607_150405.log
-└── crash_20260607_150405.dmp
+├── crash_20260901_151055_pid22284_1.log
+└── crash_20260901_151055_pid22284_1.dmp
 ```
+
+The filter is hardened for the corrupted-heap case: a re-entrancy guard stops
+nested faults from recursing, artifact buffers are static (stack-overflow
+crashes still report), dbghelp is warmed up at install time, timestamps are
+UTC (no `localtime` lock), and minidump failures are recorded in the `.log`
+instead of vanishing.
+
+Two termination classes need special attention on Windows:
+
+- `abort()`, CRT invalid parameters and C++ pure virtual calls terminate
+  **without** SEH dispatch — the crash handler funnels them into the filter as
+  custom exceptions (default on, see `HX_CLOG_CRASH_OPT_EXTRA_HANDLERS`).
+- Fail-fast terminations (heap-metadata corruption, `/GS` stack-cookie
+  corruption) **cannot be observed by any in-process handler**. The only
+  reliable dump source is Windows Error Reporting, which runs out of process:
+
+  ```c
+  hx_clog_wer_local_dumps_enable(NULL, 1, 10); /* per-app HKCU LocalDumps */
+  ```
+
+  Combined with WER pass-through (default on), WER writes `<exe>.<pid>.dmp`
+  for every WER-reported termination — including the fail-fast ones. See
+  [docs/crash.md](docs/crash.md) for the full termination-coverage table.
 
 Suggested CMake option:
 

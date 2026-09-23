@@ -1,9 +1,23 @@
 /*
  * hx_clog - asynchronous logging engine.
  *
- * A bounded ring queue of pre-allocated slots plus one background worker that
- * pops batches and writes them to the sinks. Overflow behaviour is selectable
- * (BLOCK / DROP_NEW / DROP_OLD).
+ * Decouples producers (business threads calling HX_LOG_*) from the sinks: a
+ * bounded ring queue of pre-allocated slots plus ONE background worker that
+ * pops lines in batches and hands them to the synchronous emit path
+ * (hx_core_emit_to_sinks, in hx_clog_core.c).
+ *
+ *   - producers: hx_async_enqueue (level filtering already happened
+ *     upstream). Overflow behaviour is selectable per configuration: BLOCK
+ *     (backpressure, lossless), DROP_NEW (cheap, keeps old lines) or
+ *     DROP_OLD (keeps the freshest lines).
+ *   - worker: batches up to batch_size lines into a reused scratch buffer,
+ *     releases the lock, then writes; flushes all sinks every
+ *     flush_interval_ms; drains the queue and exits on stop. Drop counters
+ *     and a high-watermark feed the statistics API.
+ *   - slot buffers are kept and reused across lines so the steady state is
+ *     allocation-free; a buffer that ballooned for one huge line is shrunk
+ *     back on the next reuse (HX_ASYNC_SLOT_KEEP_CAP) so a single outlier
+ *     cannot pin memory forever.
  *
  * Built only when HX_CLOG_ENABLE_ASYNC is defined.
  *
@@ -12,6 +26,9 @@
  * passed the "running" check moments before shutdown (destroying a mutex
  * another thread still holds is undefined behaviour). All queue state,
  * including the running/stop flags, is only read or written under the lock.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #include "hx_clog_internal.h"
 

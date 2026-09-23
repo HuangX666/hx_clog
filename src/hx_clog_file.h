@@ -1,8 +1,14 @@
 /*
  * hx_clog - shared file sink state (internal).
  *
- * Defined in its own header so hx_clog_file.c and hx_clog_rotate.c can both
- * see the layout.
+ * Defined in its own header so hx_clog_file.c (write / flush / reopen) and
+ * hx_clog_rotate.c (rotation / archiving / cleanup / gzip) can both see the
+ * layout: the FILE*, the active file path, the rotation bookkeeping
+ * (counters, last-rotation timestamps, per-day subdirectory) and the
+ * per-sink mutex that serializes writers.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #ifndef HX_CLOG_FILE_H
 #define HX_CLOG_FILE_H

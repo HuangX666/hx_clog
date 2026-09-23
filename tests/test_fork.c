@@ -2,6 +2,7 @@
  * hx_clog_after_fork_child() at runtime — the child must be able to keep
  * logging/flushing without inheriting a locked mutex. POSIX only (built only
  * on non-Windows by CMake). */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

@@ -1,4 +1,5 @@
 /* hx_clog example: minimal synchronous console + file logging. */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 int main(void) {

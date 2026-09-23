@@ -1,4 +1,5 @@
 /* hx_clog test: INI config file loading (hx_clog_init_from_file). */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

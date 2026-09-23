@@ -349,6 +349,19 @@ void hx_clog_uninstall_crash_handler(void);
 /* 1.1.0: append app context to the report from inside the handler.
  * Must be async-signal-safe: write(fd, ...) only. */
 int  hx_clog_set_crash_callback(hx_clog_crash_callback_t cb, void* user_data);
+
+/* 1.4.0: runtime options — extra termination capture / WER pass-through /
+ * minidump detail level. Accepted and ignored on POSIX. */
+int  hx_clog_crash_set_option(int option, long value);
+
+/* 1.4.0 (Windows): register per-app WER LocalDumps under HKCU so WER writes
+ * out-of-process dumps even for fail-fast terminations (heap metadata
+ * corruption, /GS stack cookie, ...) that no in-process handler can see.
+ * folder: NULL = crash_dir; dump_type: 1 = minidump, 2 = full;
+ * max_count: retained dumps (0 = 10). */
+int  hx_clog_wer_local_dumps_enable(const char* folder, int dump_type,
+                                    int max_count);
+int  hx_clog_wer_local_dumps_disable(void);
 ```
 
 See [crash.md](crash.md) for details.

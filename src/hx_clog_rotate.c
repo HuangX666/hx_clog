@@ -1,15 +1,29 @@
 /*
- * hx_clog - log rotation and cleanup.
+ * hx_clog - log rotation, archiving and backup cleanup.
  *
- * Operates on the file sink state. Two triggers:
- *   - by size: active file would exceed max_file_size.
- *   - by day:  the calendar day changed since the file was opened.
+ * Operates on the file sink state (hx_clog_file.h) on every write, before
+ * the bytes land. Three triggers:
+ *   - by size:     the active file would exceed max_file_size
+ *   - by day:      the calendar day changed since the file was opened
+ *                  (optionally into a per-day YYYY-MM-DD subdirectory)
+ *   - by interval: a fixed rotate_interval_seconds has elapsed
  *
  * Archive naming: <stem>.<YYYY-MM-DD>.<N>.<ext>, e.g. app.2026-06-07.1.log
  *
  * Cleanup order (per design doc):
  *   1. delete files older than max_backup_days.
- *   2. compress oldest uncompressed files beyond max_backup_files.
+ *   2. compress oldest uncompressed files beyond max_backup_files
+ *      (gzip when built with zlib; without it, archives beyond the limit
+ *      are deleted instead and a warning goes to the error handler).
+ *
+ * Directory scans (FindFirstFileW on Windows, dirent elsewhere) match the
+ * archive naming pattern STRICTLY — files that merely look similar are never
+ * touched. Rotation runs while the sink's own mutex and the core sink_lock
+ * are held, so gzip-compressing a large archive stalls logging by design
+ * (documented trade-off for a single-threaded write path).
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #include "hx_clog_file.h"
 

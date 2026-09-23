@@ -288,6 +288,18 @@ void hx_clog_uninstall_crash_handler(void);
 /* 1.1.0: append app context to the report from inside the handler.
  * Must be async-signal-safe: write(fd, ...) only. */
 int  hx_clog_set_crash_callback(hx_clog_crash_callback_t cb, void* user_data);
+
+/* 1.4.0: 运行期选项——额外终止路径接管 / WER 放行 / minidump 详细档位。
+ * POSIX 上接受但忽略。 */
+int  hx_clog_crash_set_option(int option, long value);
+
+/* 1.4.0（Windows）：在 HKCU 下注册按应用 WER LocalDumps，令 WER 对
+ * fail-fast 终止（堆元数据损坏、/GS 栈 cookie 等进程内无法捕获的场景）
+ * 也能写出进程外 dump。folder: NULL = crash_dir; dump_type: 1 = minidump,
+ * 2 = full; max_count: 保留个数（0 = 10）。 */
+int  hx_clog_wer_local_dumps_enable(const char* folder, int dump_type,
+                                    int max_count);
+int  hx_clog_wer_local_dumps_disable(void);
 ```
 
 详情见 [crash.md](crash.md)。

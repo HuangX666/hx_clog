@@ -1,8 +1,26 @@
 /*
- * hx_clog - sink layer.
+ * hx_clog - sink layer: generic dispatch plus the console, callback and
+ * system sinks.
  *
- * Provides the generic sink dispatch helpers plus the console and callback
- * sinks. The file sink lives in hx_clog_file.c.
+ * hx_sink_write() is the single choke point every formatted line passes
+ * through on the synchronous path: it applies the per-sink minimum level and
+ * forwards to the sink's vtable. Sinks implemented in this file:
+ *
+ *   - console: level-routed stdout/stderr with optional ANSI colouring and
+ *     tty detection (_isatty on Windows)
+ *   - callback: forwards the raw bytes to a user callback. The callback runs
+ *     UNDER the core sink_lock (which is recursive for exactly this reason),
+ *     so it may re-enter the public API — but it must be fast, because it
+ *     stalls all other logging while it runs
+ *   - system sinks behind platform/option gates: syslog (POSIX/macOS),
+ *     Windows Event Log (RegisterEventSourceA/ReportEventA), Android logcat,
+ *     Apple os_log
+ *
+ * The file sink lives in hx_clog_file.c and the TCP/UDP network sink in
+ * hx_clog_net.c; they register the same vtable shape.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #include "hx_clog_internal.h"
 

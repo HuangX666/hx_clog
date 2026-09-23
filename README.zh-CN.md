@@ -1035,7 +1035,24 @@ typedef struct hx_clog_crash_config {
 
 int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config);
 void hx_clog_uninstall_crash_handler(void);
+
+/* 1.4.0 运行期选项（Windows 为主；POSIX 上接受但忽略） */
+int hx_clog_crash_set_option(int option, long value);
+/* 1.4.0（Windows）：可选注册 WER LocalDumps（HKCU）——堆元数据损坏等
+ * fail-fast 终止任何进程内 handler 都无法捕获，WER 进程外 dump 是唯一
+ * 可靠来源。 */
+int hx_clog_wer_local_dumps_enable(const char* folder, int dump_type,
+                                   int max_count);
+int hx_clog_wer_local_dumps_disable(void);
 ```
+
+`hx_clog_crash_set_option` 选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `HX_CLOG_CRASH_OPT_EXTRA_HANDLERS` | Windows 上同时接管 `abort()`/SIGABRT、CRT 无效参数、C++ 纯虚调用（这些终止不经过 SEH，默认什么都不会留下）。默认开。 |
+| `HX_CLOG_CRASH_OPT_WER_PASSTHROUGH` | 写完报告和 minidump 后把异常交给 Windows 错误报告，保住进程外 dump 通道。默认开。 |
+| `HX_CLOG_CRASH_OPT_MINIDUMP_TYPE` | `0` 最小、`1` 默认、`2` 大（数据段+句柄+线程信息——内存损坏分析最合适）、`3` 全内存。 |
 
 字段建议：
 
@@ -1084,9 +1101,22 @@ Windows 下可选支持 `MiniDumpWriteDump`：
 
 ```text
 crash/
-├── crash_20260607_150405.log
-└── crash_20260607_150405.dmp
+├── crash_20260901_151055_pid22284_1.log
+└── crash_20260901_151055_pid22284_1.dmp
 ```
+
+过滤器针对堆已损坏场景做了强化：重入保护防止嵌套异常递归、产物缓冲为静态存储（栈溢出崩溃也能写出报告）、dbghelp 安装时预热、时间戳用 UTC（不经 `localtime` 锁）、minidump 失败会记录在 `.log` 中而非静默消失。
+
+Windows 上有两类终止需要特别注意：
+
+- `abort()`、CRT 无效参数、C++ 纯虚调用**不经过** SEH 派发——crash handler 会把它们以自定义异常汇入过滤器（默认开，见 `HX_CLOG_CRASH_OPT_EXTRA_HANDLERS`）。
+- fail-fast 类终止（堆元数据损坏、`/GS` 栈 cookie 破坏）**任何进程内 handler 都不可能捕获**，唯一可靠的 dump 来源是进程外运行的 Windows 错误报告：
+
+  ```c
+  hx_clog_wer_local_dumps_enable(NULL, 1, 10); /* 按应用注册 HKCU LocalDumps */
+  ```
+
+  配合 WER 放行（默认开），WER 会对每次上报的终止（含 fail-fast）写出 `<exe>.<pid>.dmp`。完整终止路径覆盖表见 [docs/zh-CN/crash.md](docs/zh-CN/crash.md)。
 
 建议 CMake 选项：
 

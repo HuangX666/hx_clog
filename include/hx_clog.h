@@ -1,12 +1,40 @@
 /*
  * hx_clog - A portable C/C++11 logging framework.
+ * This file: the public C API header (the only header consumers include).
  *
- * Public C API. This single header is enough to use the basic logging
- * capabilities. The implementation lives in the src/ directory and is built
- * as a static or shared library via CMake.
+ * Declares the complete public surface of the library:
+ *
+ *   - version macros (HX_CLOG_VERSION_*) and the hx_clog_result_t codes
+ *   - configuration (hx_clog_config_t) and lifecycle: hx_clog_init /
+ *     hx_clog_init_from_file (INI file + environment) / hx_clog_reconfigure /
+ *     hx_clog_shutdown / hx_clog_flush / hx_clog_reopen
+ *   - the write path: hx_clog_write / writev (+ _named and per-logger
+ *     variants) and the HX_LOG_* macro family with compile-time level
+ *     cutting (HX_CLOG_ACTIVE_LEVEL) and _IF / _EVERY_N conditionals
+ *   - sinks: console, rotating file, user callback, syslog, Windows Event
+ *     Log, Android logcat, Apple os_log, and TCP/UDP network — each with an
+ *     optional per-sink level and pattern/format override
+ *   - formatting: pattern mode, JSON mode, and custom formatter callbacks
+ *   - the named-logger registry with a dotted ("a.b.c") level hierarchy
+ *   - thread-local context (key=value pairs, rendered via %x)
+ *   - crash handling: crash config, install/uninstall, the async-signal-safe
+ *     crash callback, runtime options (hx_clog_crash_set_option) and the
+ *     opt-in WER LocalDumps registration (Windows, hx_clog_wer_local_dumps_*)
+ *   - operational hooks: error handler, duplicate suppression, statistics,
+ *     custom allocator, and fork support (hx_clog_after_fork_child, Unix)
+ *
+ * ABI policy: the C ABI is append-only. Functions and enum values are never
+ * removed or repurposed; structs only ever grow at the END (new fields are
+ * appended), so code compiled against an older header keeps linking and
+ * running against a newer library. The implementation lives in src/ and is
+ * built as a static or shared library via CMake.
  *
  * The API is intentionally C ABI only so it can be consumed easily from C,
- * C++, Rust, Go or any language with a C FFI.
+ * C++, Rust, Go or any language with a C FFI. A header-only C++11 RAII
+ * wrapper is available separately in hx_clog_cpp.hpp.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #ifndef HX_CLOG_H
 #define HX_CLOG_H
@@ -465,6 +493,60 @@ HX_CLOG_API void hx_clog_uninstall_crash_handler(void);
 typedef void (*hx_clog_crash_callback_t)(int fd, void* user_data);
 HX_CLOG_API int hx_clog_set_crash_callback(hx_clog_crash_callback_t cb,
                                            void* user_data);
+
+/* -------------------------------------------------------------------------
+ * Crash handler runtime options (Windows-focused; added in 1.4.0)
+ *
+ * Fine-tune the crash handler without touching the config struct. Callable
+ * before or after hx_clog_install_crash_handler. On non-Windows platforms
+ * the options are accepted and ignored (POSIX already catches SIGABRT and
+ * re-raises after writing its report).
+ * ------------------------------------------------------------------------- */
+#define HX_CLOG_CRASH_OPT_EXTRA_HANDLERS  1
+#define HX_CLOG_CRASH_OPT_WER_PASSTHROUGH 2
+#define HX_CLOG_CRASH_OPT_MINIDUMP_TYPE   3
+
+HX_CLOG_API int hx_clog_crash_set_option(int option, long value);
+/* HX_CLOG_CRASH_OPT_EXTRA_HANDLERS (default 1): also capture abort() /
+ *    SIGABRT, CRT invalid parameters and C++ pure virtual calls on Windows.
+ *    These terminate without any SEH dispatch, so without this hook they
+ *    produce neither a crash report nor a minidump. Toggling re-installs /
+ *    removes the underlying CRT handlers immediately.
+ * HX_CLOG_CRASH_OPT_WER_PASSTHROUGH (default 1): after writing its report and
+ *    minidump, hand the exception to Windows Error Reporting instead of
+ *    terminating directly. WER runs out of process, so this keeps a dump path
+ *    alive even when the in-process dump failed (e.g. corrupted heap), and it
+ *    is required for the LocalDumps registration below to fire.
+ * HX_CLOG_CRASH_OPT_MINIDUMP_TYPE: 0 = minimal, 1 = default (indirectly
+ *    referenced memory), 2 = large (adds data segments, handles, thread info
+ *    — the most useful level for memory-corruption analysis), 3 = full memory.
+ */
+
+/* -------------------------------------------------------------------------
+ * WER LocalDumps registration (Windows only, opt-in)
+ *
+ * Fail-fast terminations — heap metadata corruption, /GS stack-cookie
+ * corruption, retail CRT invalid parameters — never reach SEH, so no
+ * in-process handler (ours or anyone else's) can write a dump for them.
+ * Windows Error Reporting, however, runs OUT OF PROCESS and can. This call
+ * registers per-application LocalDumps for the current executable under
+ * HKCU (no administrator rights required):
+ *
+ *   HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\<exe>
+ *
+ * WER then writes <exe>.<pid>.dmp files into the given folder for every
+ * WER-reported termination, including the fail-fast ones. Call it explicitly
+ * when you want that safety net — hx_clog never touches the registry
+ * otherwise. Requires the WER service, which is enabled by default.
+ *
+ * folder:    dump directory (UTF-8; NULL = the configured crash_dir, made
+ *            absolute — WER needs an absolute path).
+ * dump_type: 1 = minidump, 2 = full dump.
+ * max_count: retained dumps before WER deletes the oldest (0 = 10).
+ * ------------------------------------------------------------------------- */
+HX_CLOG_API int hx_clog_wer_local_dumps_enable(const char* folder,
+                                               int dump_type, int max_count);
+HX_CLOG_API int hx_clog_wer_local_dumps_disable(void);
 
 /* -------------------------------------------------------------------------
  * fork support (Unix)

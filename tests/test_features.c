@@ -1,6 +1,7 @@
 /* hx_clog test: named loggers, context, JSON, formatter, sink ids,
  * reconfigure, per-sink format overrides, duplicate suppression and the
  * internal error handler. */
+/* Copyright (c) 2026 HuangX - MIT license (see LICENSE). Test/example code, not part of the shipped library. */
 #include "hx_clog.h"
 
 #include <stdio.h>

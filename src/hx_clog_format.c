@@ -1,8 +1,14 @@
 /*
- * hx_clog - log formatting.
+ * hx_clog - log formatting: the pattern engine and the JSON formatter.
  *
- * Implements the pattern engine described in the design doc. Supported
- * placeholders:
+ * Both formatters implement the same snprintf-style contract that core's
+ * retry logic depends on: render into (out, out_size), always NUL-terminate,
+ * never write more than out_size bytes, and return the number of bytes the
+ * FULL rendering would have needed (excluding the NUL). A return value
+ * >= out_size signals truncation, letting the caller retry once into an
+ * exactly-sized heap buffer.
+ *
+ * Pattern engine placeholders:
  *   %Y %m %d %H %M %S   date/time components
  *   %e                  milliseconds (3 digits)
  *   %l                  level (padded short name)
@@ -17,6 +23,16 @@
  *   %x                  thread-local context (key=value list)
  *   %n                  newline
  *   %%                  literal percent
+ *
+ * The JSON formatter (hx_format_json_record) emits one object per line with
+ * the same information; string values are escaped (quotes, backslashes,
+ * control characters).
+ *
+ * Pure functions: no global state, no locks, no allocation — safe to call
+ * from any thread, including the async worker and crash-adjacent code.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #include "hx_clog_internal.h"
 

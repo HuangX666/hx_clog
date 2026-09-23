@@ -1,10 +1,25 @@
 /*
- * hx_clog - optional C++11 RAII wrapper.
+ * hx_clog - optional C++11 RAII wrapper over the public C API.
  *
- * A thin convenience layer over the C API. It does not reimplement any core
- * logic and exports no C++ ABI from the library. Include it only in C++
- * translation units that want the sugar; the C macros (HX_LOG_INFO, ...) keep
- * working unchanged and remain the recommended way to log (accurate file/line).
+ * A thin convenience layer; it reimplements no core logic and exports no C++
+ * ABI from the library. Provided for C++ translation units that prefer
+ * objects and std::string over the C interface:
+ *
+ *   - Config: owns copies of every config string, so temporaries (literals,
+ *     std::string::c_str(), formatted paths) can be passed safely to init
+ *   - Logger: RAII handle to a named logger from hx_clog_logger_get, with
+ *     printf-style trace..fatal() and brace-format tracef..fatalf() methods;
+ *     brace-formatted arguments are converted with operator<< and funneled
+ *     through "%s", so a user format string can never mismatch the argument
+ *     list
+ *   - a std::source_location overload (C++20) when the toolchain provides it
+ *
+ * The C macros (HX_LOG_INFO, ...) keep working unchanged in the same
+ * translation unit and remain the recommended way to log (accurate
+ * file/line with zero overhead).
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #ifndef HX_CLOG_CPP_HPP
 #define HX_CLOG_CPP_HPP

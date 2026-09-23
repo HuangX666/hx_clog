@@ -1,9 +1,25 @@
 /*
- * hx_clog - file sink.
+ * hx_clog - file sink: buffered writes to a single log file.
  *
- * Buffered file output with optional rotation. The sink owns a FILE* and a
- * mutex; rotation logic lives in hx_clog_rotate.c but operates on this
- * struct.
+ * Owns a FILE* opened in binary append mode plus a per-sink mutex that is
+ * nested INSIDE the core sink_lock on the write path. Every write goes
+ * through hx_rotate_maybe() first, so size/day/interval rotation happens
+ * transparently before the bytes land. Short fwrite results (disk full,
+ * device error) are reported through the error handler once per failure
+ * episode rather than retried on every line. Also provides:
+ *
+ *   - hx_sink_file_reopen(): close and reopen the current path, used after
+ *     external truncation/rotation by ops tooling
+ *   - hx_sink_file_after_fork(): re-initializes the sink's mutex in a forked
+ *     child (POSIX) — locks do not survive fork()
+ *   - UTF-8 paths on Windows via the wide-character fopen wrapper, so
+ *     non-ASCII directories work regardless of the system codepage
+ *
+ * The rotation/archiving logic itself lives in hx_clog_rotate.c and operates
+ * on the shared struct from hx_clog_file.h.
+ *
+ * Copyright (c) 2026 HuangX
+ * SPDX-License-Identifier: MIT
  */
 #include "hx_clog_file.h"
 
