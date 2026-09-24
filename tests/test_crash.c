@@ -86,6 +86,11 @@ int main(int argc, char** argv) {
     CHECK(hx_clog_crash_set_option(0, 1) == HX_CLOG_ERR_INVALID_ARGUMENT);
     CHECK(hx_clog_crash_set_option(999, 1) == HX_CLOG_ERR_INVALID_ARGUMENT);
 
+    /* recheck: handler is ours and was just installed → 0 (no re-install
+     * needed); before any install it is an error (checked after uninstall
+     * below) */
+    CHECK(hx_clog_crash_handler_recheck() == 0);
+
 #if defined(_WIN32)
     /* WER LocalDumps round trip against HKCU for THIS test executable;
      * disable() removes the key again so nothing is left behind. enable()
@@ -141,6 +146,9 @@ int main(int argc, char** argv) {
 #endif
 
     hx_clog_uninstall_crash_handler();
+#if defined(HX_CLOG_ENABLE_CRASH)
+    CHECK(hx_clog_crash_handler_recheck() == HX_CLOG_ERR_NOT_INITIALIZED);
+#endif
     hx_clog_shutdown();
 
     printf("test_crash: OK\n");

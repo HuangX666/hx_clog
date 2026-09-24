@@ -289,6 +289,10 @@ void hx_clog_uninstall_crash_handler(void);
  * Must be async-signal-safe: write(fd, ...) only. */
 int  hx_clog_set_crash_callback(hx_clog_crash_callback_t cb, void* user_data);
 
+/* 1.4.0: 若其他组件覆盖了崩溃处理器则重新装回。返回 1=已重装,0=原本完好,
+ * <0=未安装/未编译。 */
+int  hx_clog_crash_handler_recheck(void);
+
 /* 1.4.0: 运行期选项——额外终止路径接管 / WER 放行 / minidump 详细档位。
  * POSIX 上接受但忽略。 */
 int  hx_clog_crash_set_option(int option, long value);

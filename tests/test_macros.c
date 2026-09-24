@@ -78,6 +78,15 @@ int main(void) {
     hx_clog_flush();
     CHECK(g_delivered == 4);
 
+    /* EVERY_N(0) must degrade to "log every call" instead of dividing by
+     * zero (which used to be a SIGFPE). 3 calls → 3 deliveries. */
+    g_delivered = 0;
+    for (i = 0; i < 3; ++i) {
+        HX_LOG_INFO_EVERY_N(0, "always %d", i);
+    }
+    hx_clog_flush();
+    CHECK(g_delivered == 3);
+
     /* M6: config readback reflects the applied config */
     {
         hx_clog_config_t got;
@@ -87,6 +96,28 @@ int main(void) {
         CHECK(got.enable_console == 0);
         CHECK(got.enable_file == 0);
         CHECK(got.pattern != NULL && got.pattern[0] != '\0');
+    }
+
+    /* readback is FRESH: a later hx_clog_set_level must be reflected instead
+     * of contradicting the snapshot taken at init time */
+    {
+        hx_clog_config_t got;
+        hx_clog_set_level(HX_CLOG_LEVEL_ERROR);
+        memset(&got, 0, sizeof(got));
+        CHECK(hx_clog_get_config(&got) == HX_CLOG_OK);
+        CHECK(got.level == HX_CLOG_LEVEL_ERROR);
+        hx_clog_set_level(HX_CLOG_LEVEL_TRACE); /* restore */
+        CHECK(hx_clog_get_config(&got) == HX_CLOG_OK);
+        CHECK(got.level == HX_CLOG_LEVEL_TRACE);
+    }
+
+    /* documented get_config -> modify -> reconfigure loop must not blow up on
+     * self-aliased string copies (pattern pointer points into our storage) */
+    {
+        hx_clog_config_t got;
+        memset(&got, 0, sizeof(got));
+        CHECK(hx_clog_get_config(&got) == HX_CLOG_OK);
+        CHECK(hx_clog_reconfigure(&got) == HX_CLOG_OK);
     }
 
     hx_clog_shutdown();

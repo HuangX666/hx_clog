@@ -65,6 +65,31 @@ int main(void) {
     hx_clog_logger_drop_all();
     CHECK(hx_clog_logger_count() == 0);
 
+    /* drop_all must not free the entries while user threads may still hold
+     * pointers: the detached entries stay readable (zombie entries), find
+     * stops seeing them, and re-registering the same name works. */
+    CHECK(hx_clog_logger_find("network.tcp") == NULL);
+    CHECK(hx_clog_logger_name(net));                    /* pointer still valid */
+    CHECK(hx_clog_logger_get_level(net) == HX_CLOG_LEVEL_TRACE);
+    again = hx_clog_logger_get("network");
+    CHECK(again != NULL && again != net);               /* fresh entry */
+    CHECK(hx_clog_logger_count() == 1);
+    CHECK(hx_clog_logger_find("network") == again);
+
+    /* names longer than the fixed storage (127 chars) are rejected instead of
+     * being truncated: truncated storage never matched full-name lookup, so
+     * every get() used to register yet another entry forever. */
+    {
+        char longname[300];
+        unsigned int before;
+        memset(longname, 'a', sizeof(longname) - 1);
+        longname[sizeof(longname) - 1] = '\0';
+        before = hx_clog_logger_count();
+        CHECK(hx_clog_logger_get(longname) == NULL);
+        CHECK(hx_clog_logger_find(longname) == NULL);
+        CHECK(hx_clog_logger_count() == before); /* nothing registered */
+    }
+
     hx_clog_shutdown();
     printf("ALL PASS\n");
     return 0;

@@ -41,6 +41,9 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#if defined(_MSC_VER)
+#  include <intrin.h> /* _InterlockedIncrement, used by the EVERY_N helper */
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,7 +74,7 @@ extern "C" {
  * Version
  * ------------------------------------------------------------------------- */
 #define HX_CLOG_VERSION_MAJOR 1
-#define HX_CLOG_VERSION_MINOR 2
+#define HX_CLOG_VERSION_MINOR 3
 #define HX_CLOG_VERSION_PATCH 0
 
 /* -------------------------------------------------------------------------
@@ -485,6 +488,14 @@ HX_CLOG_API void hx_clog_crash_config_default(hx_clog_crash_config_t* config);
 HX_CLOG_API int  hx_clog_install_crash_handler(const hx_clog_crash_config_t* config);
 HX_CLOG_API void hx_clog_uninstall_crash_handler(void);
 
+/* Re-assert the crash handler if another component replaced it.
+ * SetUnhandledExceptionFilter / signal() are process-global single slots, and
+ * a third-party library may install its own after us. Returns 1 if the
+ * handler was re-installed, 0 if it was still intact, or a negative
+ * hx_clog_result_t error code (not installed / compiled out). Cheap enough
+ * to call periodically or before operations known to install handlers. */
+HX_CLOG_API int hx_clog_crash_handler_recheck(void);
+
 /* Optional user hook invoked from inside the crash handler after the report
  * body has been written (added in 1.1.0). `fd` is the open crash report file
  * descriptor: append your own context with low-level write() only. The
@@ -583,16 +594,35 @@ HX_CLOG_API void hx_clog_after_fork_child(void);
 
 /* HX_LOG_<L>_IF(cond, ...): log only when cond is true. HX_LOG_<L>_EVERY_N(n,
  * ...): log on the 1st and then every n-th call at that site (per-site static
- * counter; the count is approximate under concurrency — not atomic — matching
- * glog's default). When the level is compiled out, the condition / counter are
- * not evaluated at all. */
+ * counter, atomically incremented so concurrent call sites stay well-defined
+ * under thread checkers; the count under concurrency is still approximate,
+ * matching glog's default). n == 0 is treated as 1 (log every call) instead of
+ * dividing by zero. When the level is compiled out, the condition / counter
+ * are not evaluated at all. */
+
+/* Relaxed atomic increment usable from C and C++ without pulling platform
+ * headers into this one; matches the atomics the library itself uses. */
+static inline int hx_clog_every_n_hit(unsigned long* counter, unsigned long n) {
+    unsigned long v;
+    if (n == 0) {
+        n = 1;
+    }
+#if defined(__GNUC__) || defined(__clang__)
+    v = (unsigned long)__atomic_add_fetch(counter, 1ul, __ATOMIC_RELAXED);
+#elif defined(_MSC_VER)
+    v = (unsigned long)_InterlockedIncrement((volatile long*)counter);
+#else
+    v = ++(*counter); /* best effort on exotic compilers */
+#endif
+    return ((v - 1) % n) == 0;
+}
 
 #if HX_CLOG_ACTIVE_LEVEL <= HX_CLOG_LEVEL_NUM_TRACE
 #  define HX_LOG_TRACE(...)           hx_clog_write(HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOG_NAMED_TRACE(name,...) hx_clog_write_named(HX_CLOG_LEVEL_TRACE, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOGGER_TRACE(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_TRACE, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOG_TRACE_IF(cond,...)    do { if (cond) HX_LOG_TRACE(__VA_ARGS__); } while (0)
-#  define HX_LOG_TRACE_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_TRACE(__VA_ARGS__); } while (0)
+#  define HX_LOG_TRACE_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if (hx_clog_every_n_hit(&hx_clog_n_, (unsigned long)(n))) HX_LOG_TRACE(__VA_ARGS__); } while (0)
 #else
 #  define HX_LOG_TRACE(...)            ((void)0)
 #  define HX_LOG_NAMED_TRACE(name,...) ((void)0)
@@ -606,7 +636,7 @@ HX_CLOG_API void hx_clog_after_fork_child(void);
 #  define HX_LOG_NAMED_DEBUG(name,...) hx_clog_write_named(HX_CLOG_LEVEL_DEBUG, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOGGER_DEBUG(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOG_DEBUG_IF(cond,...)    do { if (cond) HX_LOG_DEBUG(__VA_ARGS__); } while (0)
-#  define HX_LOG_DEBUG_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_DEBUG(__VA_ARGS__); } while (0)
+#  define HX_LOG_DEBUG_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if (hx_clog_every_n_hit(&hx_clog_n_, (unsigned long)(n))) HX_LOG_DEBUG(__VA_ARGS__); } while (0)
 #else
 #  define HX_LOG_DEBUG(...)            ((void)0)
 #  define HX_LOG_NAMED_DEBUG(name,...) ((void)0)
@@ -620,7 +650,7 @@ HX_CLOG_API void hx_clog_after_fork_child(void);
 #  define HX_LOG_NAMED_INFO(name,...) hx_clog_write_named(HX_CLOG_LEVEL_INFO, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOGGER_INFO(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_INFO, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOG_INFO_IF(cond,...)    do { if (cond) HX_LOG_INFO(__VA_ARGS__); } while (0)
-#  define HX_LOG_INFO_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_INFO(__VA_ARGS__); } while (0)
+#  define HX_LOG_INFO_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if (hx_clog_every_n_hit(&hx_clog_n_, (unsigned long)(n))) HX_LOG_INFO(__VA_ARGS__); } while (0)
 #else
 #  define HX_LOG_INFO(...)            ((void)0)
 #  define HX_LOG_NAMED_INFO(name,...) ((void)0)
@@ -634,7 +664,7 @@ HX_CLOG_API void hx_clog_after_fork_child(void);
 #  define HX_LOG_NAMED_WARN(name,...) hx_clog_write_named(HX_CLOG_LEVEL_WARN, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOGGER_WARN(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_WARN, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOG_WARN_IF(cond,...)    do { if (cond) HX_LOG_WARN(__VA_ARGS__); } while (0)
-#  define HX_LOG_WARN_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_WARN(__VA_ARGS__); } while (0)
+#  define HX_LOG_WARN_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if (hx_clog_every_n_hit(&hx_clog_n_, (unsigned long)(n))) HX_LOG_WARN(__VA_ARGS__); } while (0)
 #else
 #  define HX_LOG_WARN(...)            ((void)0)
 #  define HX_LOG_NAMED_WARN(name,...) ((void)0)
@@ -648,7 +678,7 @@ HX_CLOG_API void hx_clog_after_fork_child(void);
 #  define HX_LOG_NAMED_ERROR(name,...) hx_clog_write_named(HX_CLOG_LEVEL_ERROR, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOGGER_ERROR(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOG_ERROR_IF(cond,...)    do { if (cond) HX_LOG_ERROR(__VA_ARGS__); } while (0)
-#  define HX_LOG_ERROR_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_ERROR(__VA_ARGS__); } while (0)
+#  define HX_LOG_ERROR_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if (hx_clog_every_n_hit(&hx_clog_n_, (unsigned long)(n))) HX_LOG_ERROR(__VA_ARGS__); } while (0)
 #else
 #  define HX_LOG_ERROR(...)           ((void)0)
 #  define HX_LOG_NAMED_ERROR(name,...) ((void)0)
@@ -662,7 +692,7 @@ HX_CLOG_API void hx_clog_after_fork_child(void);
 #  define HX_LOG_NAMED_FATAL(name,...) hx_clog_write_named(HX_CLOG_LEVEL_FATAL, name, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOGGER_FATAL(logger,...)  hx_clog_logger_write(logger, HX_CLOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #  define HX_LOG_FATAL_IF(cond,...)    do { if (cond) HX_LOG_FATAL(__VA_ARGS__); } while (0)
-#  define HX_LOG_FATAL_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if ((hx_clog_n_++ % (unsigned long)(n))==0) HX_LOG_FATAL(__VA_ARGS__); } while (0)
+#  define HX_LOG_FATAL_EVERY_N(n,...)  do { static unsigned long hx_clog_n_=0; if (hx_clog_every_n_hit(&hx_clog_n_, (unsigned long)(n))) HX_LOG_FATAL(__VA_ARGS__); } while (0)
 #else
 #  define HX_LOG_FATAL(...)           ((void)0)
 #  define HX_LOG_NAMED_FATAL(name,...) ((void)0)

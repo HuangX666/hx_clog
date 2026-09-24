@@ -66,6 +66,9 @@ typedef struct {
     int        running;
     int        stop;
     int        flush_request;
+    int        worker_exited;   /* set by the worker on its way out (POSIX
+                                * liveness check; Windows also probes the
+                                * thread handle) */
 
     hx_thread_t worker;
 
@@ -332,26 +335,79 @@ static void worker_main(void* arg) {
         }
         hx_mutex_unlock(&g_async_lock);
     }
+
+    /* mark the exit so flush waiters stop waiting for a drained queue that
+     * will never drain (POSIX liveness check) */
+    hx_mutex_lock(&g_async_lock);
+    g_async.worker_exited = 1;
+    hx_mutex_unlock(&g_async_lock);
 }
 
-void hx_async_flush(void) {
+/* Caller holds g_async_lock. A drained-by-worker outcome requires a live
+ * worker. On Windows a terminated thread's handle is signaled, so this also
+ * detects a worker killed by ExitProcess before DLL_PROCESS_DETACH — exactly
+ * the case where waiting forever would hang the process under the loader
+ * lock. */
+static int worker_alive_locked(void) {
+    if (!g_async.running || g_async.worker_exited) {
+        return 0;
+    }
+#if defined(HX_PLATFORM_WINDOWS)
+    if (g_async.worker != NULL &&
+        WaitForSingleObject((HANDLE)g_async.worker, 0) == WAIT_OBJECT_0) {
+        return 0;
+    }
+#endif
+    return 1;
+}
+
+static int async_flush_internal(unsigned int timeout_ms) {
+    long long deadline = 0;
+    int rc = 0;
+
     if (!g_async_prims_ready) {
-        return;
+        return 0;
+    }
+    if (timeout_ms != 0) {
+        deadline = hx_monotonic_ms() + (long long)timeout_ms;
     }
     hx_mutex_lock(&g_async_lock);
     if (!g_async.running || g_async.count == 0) {
         hx_mutex_unlock(&g_async_lock);
-        return;
+        return 0;
+    }
+    if (!worker_alive_locked()) {
+        /* nobody will ever drain the queue; do not wait at all */
+        hx_mutex_unlock(&g_async_lock);
+        return -1;
     }
     g_async.flush_request = 1;
     hx_cond_signal(&g_async_not_empty);
     while (g_async.flush_request && g_async.running && !g_async.stop) {
-        hx_cond_wait_ms(&g_async_flushed, &g_async_lock, 100);
+        if (!worker_alive_locked()) {
+            rc = -1;
+            break;
+        }
+        hx_cond_wait_ms(&g_async_flushed, &g_async_lock, 50);
         if (g_async.count == 0) {
             break;
         }
+        if (timeout_ms != 0 && hx_monotonic_ms() >= deadline) {
+            rc = -1;
+            break;
+        }
     }
+    g_async.flush_request = 0;
     hx_mutex_unlock(&g_async_lock);
+    return rc;
+}
+
+void hx_async_flush(void) {
+    (void)async_flush_internal(0);
+}
+
+int hx_async_flush_bounded(unsigned int timeout_ms) {
+    return async_flush_internal(timeout_ms);
 }
 
 void hx_async_stop(void) {
@@ -422,6 +478,7 @@ void hx_async_after_fork_child(void) {
     g_async.count = 0;
     g_async.flush_request = 0;
     g_async.stop = 0;
+    g_async.worker_exited = 0; /* a fresh worker is started below */
     if (g_async.running) {
         if (hx_thread_create(&g_async.worker, worker_main, NULL) != HX_CLOG_OK) {
             g_async.running = 0;

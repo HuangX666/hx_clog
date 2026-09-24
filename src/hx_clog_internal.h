@@ -164,9 +164,21 @@ void hx_thread_join(hx_thread_t t);
 
 /* -------------------------------------------------------------------------
  * Atomic level (relaxed semantics are fine for filtering)
+ *
+ * MSVC / GCC / Clang get real atomic instructions over a plain int; any other
+ * C11 compiler gets a genuine _Atomic int. The storage type must match the
+ * operation family — casting between them (as an earlier version did) is
+ * undefined behaviour on exactly the exotic compilers this exists for.
  * ------------------------------------------------------------------------- */
-void            hx_atomic_store_level(volatile int* p, int v);
-int             hx_atomic_load_level(volatile int* p);
+#if defined(HX_PLATFORM_WINDOWS) || defined(__GNUC__) || defined(__clang__)
+typedef volatile int hx_atomic_int_t;
+#else
+#  include <stdatomic.h>
+typedef _Atomic int hx_atomic_int_t;
+#endif
+
+void hx_atomic_store_level(hx_atomic_int_t* p, int v);
+int  hx_atomic_load_level(hx_atomic_int_t* p);
 
 /* -------------------------------------------------------------------------
  * Platform helpers
@@ -174,6 +186,10 @@ int             hx_atomic_load_level(volatile int* p);
 unsigned long hx_get_pid(void);
 unsigned long hx_get_tid(void);
 void          hx_sleep_ms(unsigned int ms);
+
+/* Monotonic millisecond clock (never steps backwards, unlike wall time used
+ * by hx_now). For timeouts, backoff windows and liveness checks. */
+long long hx_monotonic_ms(void);
 
 /* Time with millisecond precision. */
 typedef struct hx_timestamp {
@@ -260,6 +276,9 @@ hx_clog_sink_t* hx_sink_apple_log_create(const char* subsystem);
 /* proto: 0 = TCP, 1 = UDP. Lazy-connects on first write; never blocks create. */
 hx_clog_sink_t* hx_sink_network_create(int proto, const char* host,
                                        unsigned short port);
+/* Close any inherited connection in a forked child; the sink reconnects
+ * lazily so parent and child never share one TCP stream. */
+void hx_sink_net_after_fork(hx_clog_sink_t* s);
 #endif
 
 void hx_sink_write(hx_clog_sink_t* s, hx_clog_level_t level,
@@ -289,7 +308,10 @@ void hx_context_snapshot_text(char* out, unsigned int cap);
 /* -------------------------------------------------------------------------
  * Crash ring buffer (the "last N logs")
  * ------------------------------------------------------------------------- */
-void hx_ring_init(void);
+/* Returns 0 on success (including "already initialized"), -1 when the
+ * pre-allocated ring could not be allocated. The caller decides when to
+ * report the failure, so the report can happen outside held locks. */
+int  hx_ring_init(void);
 void hx_ring_push(const char* line, unsigned int len);
 /* Dump ring buffer to an fd/FILE using only simple writes. */
 void hx_ring_dump_fd(int fd);
@@ -314,6 +336,11 @@ void hx_async_stop(void);            /* drains and joins worker */
 int  hx_async_enqueue(hx_clog_level_t level, const char* data, unsigned int size,
                       hx_clog_sink_id_t target_sink_id, int count_stats);
 void hx_async_flush(void);
+/* Bounded, liveness-checked variant for teardown/atexit contexts: gives up
+ * after timeout_ms total (and immediately when the worker is gone, e.g. it
+ * was terminated by ExitProcess before DLL_PROCESS_DETACH). Returns 0 if the
+ * queue drained, -1 if it gave up. */
+int  hx_async_flush_bounded(unsigned int timeout_ms);
 void hx_async_after_fork_child(void); /* re-init locks, restart worker */
 unsigned long long hx_async_dropped(void);
 unsigned long long hx_async_high_watermark(void);

@@ -83,6 +83,33 @@ int main(void) {
             }
         }
     }
+    CHECK(got == 1);
+
+    /* reconfigure must NOT destroy the network sink: no INI field can
+     * re-express host/port, so a reconfigure used to silently kill remote
+     * logging for the rest of the process. After reconfigure the sink must
+     * still deliver. */
+    {
+        hx_clog_config_t rc;
+        int got2 = 0;
+        hx_clog_config_default(&rc);
+        rc.enable_console = 0;
+        rc.enable_file = 0;
+        rc.pattern = "%v";
+        CHECK(hx_clog_reconfigure(&rc) == HX_CLOG_OK);
+        for (i = 0; i < 5 && !got2; ++i) {
+            HX_LOG_INFO("after-reconfigure-7");
+            hx_clog_flush();
+            n = (int)recvfrom(rx, buf, sizeof(buf) - 1, 0, NULL, NULL);
+            if (n > 0) {
+                buf[n] = '\0';
+                if (strstr(buf, "after-reconfigure-7")) {
+                    got2 = 1;
+                }
+            }
+        }
+        CHECK(got2 == 1);
+    }
 
     hx_clog_shutdown();
     CLOSESOCK(rx);

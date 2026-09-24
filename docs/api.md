@@ -350,6 +350,11 @@ void hx_clog_uninstall_crash_handler(void);
  * Must be async-signal-safe: write(fd, ...) only. */
 int  hx_clog_set_crash_callback(hx_clog_crash_callback_t cb, void* user_data);
 
+/* 1.4.0: re-assert the crash handler if another component replaced it.
+ * Returns 1 when it re-installed, 0 when intact, <0 when not installed /
+ * compiled out. */
+int  hx_clog_crash_handler_recheck(void);
+
 /* 1.4.0: runtime options — extra termination capture / WER pass-through /
  * minidump detail level. Accepted and ignored on POSIX. */
 int  hx_clog_crash_set_option(int option, long value);

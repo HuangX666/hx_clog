@@ -49,6 +49,69 @@ int main(void) {
     /* missing file is a clean error, not a crash */
     CHECK(hx_clog_init_from_file("does_not_exist_12345.ini")
               == HX_CLOG_ERR_OPEN_FILE_FAILED);
+    hx_clog_shutdown();
+
+    /* hostile-ish values: negative and oversized numbers must be rejected and
+     * the defaults kept — they used to flow through atoi() into unsigned
+     * capacities, where -1 became ~4 billion and could wrap the slot
+     * allocation. A garbage suffix must not silently disable rotation
+     * (parsed as 0). */
+    f = fopen(ini, "wb");
+    CHECK(f != NULL);
+    fputs("[hx_clog]\n"
+          "console = 0\n"
+          "file_output = 0\n"
+          "async_queue_size = -1\n"
+          "async_batch_size = 99999999999\n"
+          "flush_interval_ms = -5000\n"
+          "rotate_interval_seconds = -1\n"
+          "max_file_size = 20000000000G\n"
+          "max_backup_files = 12abc\n", f);
+    fclose(f);
+    {
+        hx_clog_config_t def;
+        hx_clog_config_default(&def);
+        CHECK(hx_clog_init_from_file(ini) == HX_CLOG_OK);
+        memset(&got, 0, sizeof(got));
+        CHECK(hx_clog_get_config(&got) == HX_CLOG_OK);
+        CHECK(got.async_queue_size == def.async_queue_size);      /* negative rejected, default kept */
+        CHECK(got.async_batch_size == 4096);                      /* oversized clamped into range */
+        CHECK(got.flush_interval_ms == def.flush_interval_ms);    /* negative rejected */
+        CHECK(got.rotate_interval_seconds == def.rotate_interval_seconds);
+        CHECK(got.max_file_size > 0);                             /* saturated, not wrapped to ~0 */
+        CHECK(got.max_backup_files == def.max_backup_files);
+        hx_clog_shutdown();
+    }
+    remove(ini);
+
+    /* a line longer than the 1200-byte reader buffer must be dropped whole:
+     * fgets used to split it and apply the truncated first fragment (and then
+     * parse the continuation as its own key=value). */
+    f = fopen(ini, "wb");
+    CHECK(f != NULL);
+    fputs("[hx_clog]\n"
+          "console = 0\n"
+          "file_output = 0\n"
+          "level = error\n"
+          "pattern = ", f);
+    {
+        int i;
+        for (i = 0; i < 2000; ++i) {
+            fputc('x', f);
+        }
+    }
+    fputs("\nlevel = debug\n", f);
+    fclose(f);
+    CHECK(hx_clog_init_from_file(ini) == HX_CLOG_OK);
+    memset(&got, 0, sizeof(got));
+    CHECK(hx_clog_get_config(&got) == HX_CLOG_OK);
+    /* "level = error" (before the long line) applies; the 2000-byte pattern
+     * fragment must NOT have been applied as a truncated pattern, and the
+     * trailing "level = debug" still parses as its own line */
+    CHECK(got.level == HX_CLOG_LEVEL_DEBUG);
+    CHECK(got.pattern != NULL && strlen(got.pattern) < 1000);
+    hx_clog_shutdown();
+    remove(ini);
 
     printf("ALL PASS\n");
     return 0;

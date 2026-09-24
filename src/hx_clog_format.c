@@ -251,8 +251,50 @@ static void ap_json_escaped(appender_t* a, const char* s, unsigned int n) {
                     ap_str(a, "\\u00");
                     ap_char(a, hex[(c >> 4) & 0xF]);
                     ap_char(a, hex[c & 0xF]);
-                } else {
+                } else if (c < 0x80) {
                     ap_char(a, (char)c);
+                } else {
+                    /* Multi-byte UTF-8 sequence. Passing invalid bytes through
+                     * verbatim would produce a line that is not valid UTF-8
+                     * and therefore not valid JSON — a JSON-lines consumer
+                     * may reject the record or the whole batch. Validate the
+                     * sequence and replace damaged bytes with U+FFFD, then
+                     * resynchronize. */
+                    unsigned int need;
+                    unsigned int cp;
+                    if ((c & 0xE0) == 0xC0)      { need = 1; cp = c & 0x1F; }
+                    else if ((c & 0xF0) == 0xE0) { need = 2; cp = c & 0x0F; }
+                    else if ((c & 0xF8) == 0xF0) { need = 3; cp = c & 0x07; }
+                    else { need = 0; cp = 0; }
+                    if (need == 0 || i + need >= n) {
+                        ap_str(a, "\xEF\xBF\xBD"); /* U+FFFD */
+                        continue; /* skip only the lead byte; resync */
+                    } else {
+                        unsigned int j;
+                        int ok = 1;
+                        for (j = 1; j <= need; ++j) {
+                            unsigned char cc = (unsigned char)s[i + j];
+                            if ((cc & 0xC0) != 0x80) {
+                                ok = 0;
+                                break;
+                            }
+                            cp = (cp << 6) | (cc & 0x3F);
+                        }
+                        if (!ok ||
+                            (need == 1 && cp < 0x80) ||
+                            (need == 2 && cp < 0x800) ||
+                            (need == 3 && cp < 0x10000) ||
+                            (cp >= 0xD800 && cp <= 0xDFFF) ||
+                            cp > 0x10FFFF) {
+                            /* truncated / overlong / surrogate / out of range */
+                            ap_str(a, "\xEF\xBF\xBD"); /* U+FFFD */
+                            continue; /* skip only the lead byte */
+                        }
+                        for (j = 0; j <= need; ++j) {
+                            ap_char(a, s[i + j]);
+                        }
+                        i += need;
+                    }
                 }
                 break;
         }

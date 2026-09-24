@@ -1,13 +1,13 @@
-# Security Policy
+# Maintenance Policy
 
 ## Supported versions
 
 hx_clog is pre-1.0 in spirit; only the latest `master` and the most recent
-tagged release receive security fixes.
+tagged release receive defect fixes.
 
-## Reporting a vulnerability
+## Reporting a defect
 
-Please report security issues **privately**, not in public issues:
+Please report problems **privately**, not in public issues:
 
 - Preferred: open a private advisory via GitHub
   ("Security" tab → "Report a vulnerability") on the repository, or
@@ -20,11 +20,13 @@ public disclosure.
 
 ## Scope notes
 
+hx_clog is a logging library, not a parser of external content:
+
 - The POSIX crash signal handler is best-effort and not fully
-  async-signal-safe; this is documented behavior, not a vulnerability.
-- The library does not parse untrusted log *input* by design — formatting is
-  driven by caller-supplied `printf`-style format strings. As with `printf`,
-  never pass attacker-controlled data as the format string itself.
+  async-signal-safe; this is documented behavior, not a defect.
+- The library does not interpret untrusted log *input* by design — formatting
+  is driven by caller-supplied `printf`-style format strings. As with
+  `printf`, do not pass external data as the format string itself.
 - The network sink transmits log lines in clear text over TCP/UDP; put it
   behind a trusted network or a TLS-terminating relay if confidentiality is
   required.

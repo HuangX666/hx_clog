@@ -17,3 +17,6 @@ logs_*/
 .idea/
 *.user
 .DS_Store
+
+# local agent session files
+/.zcode/

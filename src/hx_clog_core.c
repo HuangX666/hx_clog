@@ -68,15 +68,6 @@
 #  define HX_THREAD_LOCAL
 #endif
 
-/* C11 atomics are used only as the fallback for compilers that provide neither
- * the Windows Interlocked API nor the GCC/Clang __atomic builtins. */
-#if !defined(HX_PLATFORM_WINDOWS) && !defined(__GNUC__) && \
-    defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && \
-    !defined(__STDC_NO_ATOMICS__)
-#  include <stdatomic.h>
-#  define HX_CLOG_USE_C11_ATOMICS 1
-#endif
-
 /* =========================================================================
  * Allocator
  * ========================================================================= */
@@ -284,26 +275,22 @@ void hx_thread_join(hx_thread_t t) {
 /* =========================================================================
  * Atomic level
  * ========================================================================= */
-void hx_atomic_store_level(volatile int* p, int v) {
+void hx_atomic_store_level(hx_atomic_int_t* p, int v) {
 #if defined(HX_PLATFORM_WINDOWS)
     InterlockedExchange((volatile LONG*)p, v);
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
     __atomic_store_n(p, v, __ATOMIC_RELAXED);
-#elif defined(HX_CLOG_USE_C11_ATOMICS)
-    atomic_store_explicit((volatile _Atomic int*)p, v, memory_order_relaxed);
 #else
-    *p = v;
+    atomic_store_explicit(p, v, memory_order_relaxed);
 #endif
 }
-int hx_atomic_load_level(volatile int* p) {
+int hx_atomic_load_level(hx_atomic_int_t* p) {
 #if defined(HX_PLATFORM_WINDOWS)
     return (int)InterlockedCompareExchange((volatile LONG*)p, 0, 0);
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
     return __atomic_load_n(p, __ATOMIC_RELAXED);
-#elif defined(HX_CLOG_USE_C11_ATOMICS)
-    return (int)atomic_load_explicit((volatile _Atomic int*)p, memory_order_relaxed);
 #else
-    return *p;
+    return (int)atomic_load_explicit(p, memory_order_relaxed);
 #endif
 }
 
@@ -342,6 +329,23 @@ void hx_sleep_ms(unsigned int ms) {
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
+#endif
+}
+
+long long hx_monotonic_ms(void) {
+#if defined(HX_PLATFORM_WINDOWS)
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    return (long long)(cnt.QuadPart * 1000LL / freq.QuadPart);
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL); /* best effort on POSIX-lite targets */
+    return (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000LL;
 #endif
 }
 
@@ -552,24 +556,23 @@ static unsigned int  g_ring_count = 0;
 static hx_mutex_t    g_ring_lock;
 static int           g_ring_inited = 0;
 
-void hx_ring_init(void) {
+int hx_ring_init(void) {
     if (g_ring_inited) {
-        return;
+        return 0;
     }
     g_ring = (ring_entry_t*)hx_clog__malloc(sizeof(ring_entry_t) * HX_CLOG_RING_CAPACITY);
     if (!g_ring) {
-        /* without the ring, the crash report cannot replay the last N logs;
-         * surface it instead of silently turning every ring_push into a no-op */
-        hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
-                             "crash ring buffer allocation failed; crash reports "
-                             "will not include recent log history");
-        return;
+        /* the caller reports this where it is safe to do so (possibly outside
+         * held locks); without the ring the crash report just cannot replay
+         * the last N logs */
+        return -1;
     }
     memset(g_ring, 0, sizeof(ring_entry_t) * HX_CLOG_RING_CAPACITY);
     g_ring_head = 0;
     g_ring_count = 0;
     hx_mutex_init(&g_ring_lock);
     g_ring_inited = 1;
+    return 0;
 }
 
 void hx_ring_push(const char* line, unsigned int len) {
@@ -647,7 +650,7 @@ static HX_THREAD_LOCAL hx_context_state_t g_tls_context;
 
 struct hx_clog_logger {
     char name[128];
-    volatile int level;
+    hx_atomic_int_t level;
     int is_default;
     int registered;               /* 1 when owned by the registry */
     struct hx_clog_logger* next;  /* registry singly-linked list */
@@ -737,9 +740,9 @@ void hx_clog_context_clear(void) {
  * Global logger state
  * ========================================================================= */
 typedef struct {
-    volatile int initialized;    /* atomic: read lock-free on the hot path */
-    volatile int level;          /* atomic */
-    volatile int mode;           /* atomic: hx_clog_mode_t stored as int */
+    hx_atomic_int_t initialized;    /* atomic: read lock-free on the hot path */
+    hx_atomic_int_t level;         /* atomic */
+    hx_atomic_int_t mode;          /* atomic: hx_clog_mode_t stored as int */
     struct hx_clog_logger default_logger;
 
     hx_clog_sink_t* sinks[HX_CLOG_MAX_SINKS];
@@ -750,9 +753,9 @@ typedef struct {
     hx_clog_format_mode_t format_mode;
     hx_clog_formatter_t formatter;
     void* formatter_user_data;
-    volatile int format_gen;     /* bumped on any format-settings change so
+    hx_atomic_int_t format_gen;   /* bumped on any format-settings change so
                                   * per-thread caches can refresh lazily */
-    volatile int override_count; /* sinks with a per-sink format override */
+    hx_atomic_int_t override_count; /* sinks with a per-sink format override */
 
     hx_mutex_t sink_lock;        /* guards sink writes in sync mode + sink list */
     hx_mutex_t init_lock;        /* serializes init/shutdown/reconfigure */
@@ -1005,17 +1008,80 @@ static int ini_bool(const char* v) {
     return (ieq(v, "1") || ieq(v, "true") || ieq(v, "yes") || ieq(v, "on")) ? 1 : 0;
 }
 
-/* "10", "64K", "10M", "2G" (K/M/G are binary multiples) -> bytes */
-static unsigned long long ini_size(const char* v) {
+/* Report an ignored/rejected INI value through the error handler (cold path;
+ * message built in a stack buffer so no allocation is involved). */
+static void ini_bad(const char* key, const char* value) {
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "config file: ignoring invalid value '%.48s' for key '%.48s'; "
+             "the default is kept", value ? value : "", key ? key : "");
+    hx_core_report_error(HX_CLOG_ERR_INVALID_ARGUMENT, msg);
+}
+
+/* Unsigned decimal parser with saturation: rejects negatives, garbage and
+ * empty strings (returns -1) so a typo or a negative number can no longer
+ * wrap into a huge unsigned capacity. Saturates at UINT_MAX. */
+static int ini_u32(const char* v, unsigned int lo, unsigned int hi,
+                   unsigned int* out) {
     unsigned long long n = 0;
+    if (!v || !*v) {
+        return -1;
+    }
+    for (; *v; ++v) {
+        if (*v < '0' || *v > '9') {
+            return -1;
+        }
+        n = n * 10ULL + (unsigned long long)(*v - '0');
+        if (n > 0xFFFFFFFFULL) {
+            n = 0xFFFFFFFFULL;
+        }
+    }
+    if (n < lo) {
+        n = lo;
+    }
+    if (n > hi) {
+        n = hi;
+    }
+    *out = (unsigned int)n;
+    return 0;
+}
+
+/* "10", "64K", "10M", "2G" (K/M/G are binary multiples) -> bytes. Rejects
+ * garbage and saturates instead of wrapping, so an absurd value can no longer
+ * silently disable rotation (or wrap into a tiny limit). Returns 0/-1. */
+static int ini_size(const char* v, unsigned long long* out) {
+    unsigned long long n = 0;
+    unsigned long long unit = 1;
+    const unsigned long long kMax = 0xFFFFFFFFFFFFFFFFULL;
+    if (!v || !*v) {
+        return -1;
+    }
     while (*v >= '0' && *v <= '9') {
-        n = n * 10 + (unsigned long long)(*v - '0');
+        unsigned long long d = (unsigned long long)(*v - '0');
+        if (n > (kMax - d) / 10ULL) {
+            n = kMax;
+        } else {
+            n = n * 10ULL + d;
+        }
         v++;
     }
-    if (*v == 'k' || *v == 'K') n *= 1024ULL;
-    else if (*v == 'm' || *v == 'M') n *= 1024ULL * 1024ULL;
-    else if (*v == 'g' || *v == 'G') n *= 1024ULL * 1024ULL * 1024ULL;
-    return n;
+    if (*v != '\0') {
+        if (*v == 'k' || *v == 'K') { unit = 1024ULL; }
+        else if (*v == 'm' || *v == 'M') { unit = 1024ULL * 1024ULL; }
+        else if (*v == 'g' || *v == 'G') { unit = 1024ULL * 1024ULL * 1024ULL; }
+        else { return -1; }
+        v++;
+        if (*v != '\0') {
+            return -1; /* trailing garbage */
+        }
+        if (n != 0 && unit > kMax / n) {
+            n = kMax;
+        } else {
+            n *= unit;
+        }
+    }
+    *out = n;
+    return 0;
 }
 
 /* Apply one key=value to cfg. String values are copied into the caller's
@@ -1047,17 +1113,36 @@ static void ini_apply_kv(hx_clog_config_t* cfg, const char* k, const char* v,
         cfg->format_mode = ieq(v, "json") ? HX_CLOG_FORMAT_JSON
                                           : HX_CLOG_FORMAT_PATTERN;
     } else if (ieq(k, "max_file_size")) {
-        cfg->max_file_size = ini_size(v);
+        if (ini_size(v, &cfg->max_file_size) != 0) {
+            ini_bad(k, v);
+        }
     } else if (ieq(k, "max_backup_files")) {
-        cfg->max_backup_files = atoi(v);
+        unsigned int tmp;
+        if (ini_u32(v, 0u, 1000000u, &tmp) != 0) {
+            ini_bad(k, v);
+        } else {
+            cfg->max_backup_files = (int)tmp;
+        }
     } else if (ieq(k, "max_backup_days")) {
-        cfg->max_backup_days = atoi(v);
+        unsigned int tmp;
+        if (ini_u32(v, 0u, 36500u, &tmp) != 0) {
+            ini_bad(k, v);
+        } else {
+            cfg->max_backup_days = (int)tmp;
+        }
     } else if (ieq(k, "max_compressed_files")) {
-        cfg->max_compressed_files = atoi(v);
+        unsigned int tmp;
+        if (ini_u32(v, 0u, 1000000u, &tmp) != 0) {
+            ini_bad(k, v);
+        } else {
+            cfg->max_compressed_files = (int)tmp;
+        }
     } else if (ieq(k, "rotate_daily")) {
         cfg->rotate_daily = ini_bool(v);
     } else if (ieq(k, "rotate_interval_seconds")) {
-        cfg->rotate_interval_seconds = (unsigned int)atoi(v);
+        if (ini_u32(v, 0u, 315360000u, &cfg->rotate_interval_seconds) != 0) {
+            ini_bad(k, v);
+        }
     } else if (ieq(k, "rotate_on_startup")) {
         cfg->rotate_on_startup = ini_bool(v);
     } else if (ieq(k, "rotate_align")) {
@@ -1065,11 +1150,17 @@ static void ini_apply_kv(hx_clog_config_t* cfg, const char* k, const char* v,
     } else if (ieq(k, "date_subdir")) {
         cfg->date_subdir = ini_bool(v);
     } else if (ieq(k, "async_queue_size")) {
-        cfg->async_queue_size = (unsigned int)atoi(v);
+        if (ini_u32(v, 16u, 1048576u, &cfg->async_queue_size) != 0) {
+            ini_bad(k, v);
+        }
     } else if (ieq(k, "async_batch_size")) {
-        cfg->async_batch_size = (unsigned int)atoi(v);
+        if (ini_u32(v, 1u, 4096u, &cfg->async_batch_size) != 0) {
+            ini_bad(k, v);
+        }
     } else if (ieq(k, "flush_interval_ms")) {
-        cfg->flush_interval_ms = (unsigned int)atoi(v);
+        if (ini_u32(v, 0u, 3600000u, &cfg->flush_interval_ms) != 0) {
+            ini_bad(k, v);
+        }
     } else if (ieq(k, "crash") || ieq(k, "enable_crash_handler")) {
         cfg->enable_crash_handler = ini_bool(v);
     } else if (ieq(k, "rotate_policy")) {
@@ -1092,6 +1183,7 @@ int hx_clog_init_from_file(const char* path) {
     char line[1200];
     FILE* fp;
     int in_section = 1; /* keys before any [section] are accepted */
+    static int g_ini_longline_reported = 0;
 
     if (!path || !path[0]) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
@@ -1117,8 +1209,25 @@ int hx_clog_init_from_file(const char* path) {
         return HX_CLOG_ERR_OPEN_FILE_FAILED;
     }
     while (fgets(line, sizeof(line), fp)) {
-        char* s = ini_trim(line);
+        char* s;
         char* eq;
+        if (!strchr(line, '\n') && !feof(fp)) {
+            /* Line longer than the buffer: fgets split it. Applying the first
+             * fragment could silently misconfigure (a truncated value, or a
+             * continuation that happens to parse as its own key=value), so
+             * drop the whole logical line and consume the remainder. */
+            int ch;
+            while ((ch = fgetc(fp)) != EOF && ch != '\n') {
+            }
+            if (!g_ini_longline_reported) {
+                g_ini_longline_reported = 1;
+                hx_core_report_error(HX_CLOG_ERR_INVALID_ARGUMENT,
+                                     "config file: a line longer than 1199 "
+                                     "bytes was ignored");
+            }
+            continue;
+        }
+        s = ini_trim(line);
         if (!*s || *s == '#' || *s == ';') {
             continue;
         }
@@ -1416,11 +1525,17 @@ static void add_configured_system_sinks(const hx_clog_config_t* cfg) {
     }
 }
 
-static void close_non_callback_sinks_locked(void) {
+static void close_rebuilt_sinks_locked(void) {
     int i = 0;
     while (i < g_core.sink_count) {
         hx_clog_sink_t* s = g_core.sinks[i];
-        if (s && s->kind != HX_SINK_KIND_CALLBACK) {
+        /* Callback sinks are user-owned and survive reconfigure. Network
+         * sinks survive too: no INI field can re-express their
+         * host/port/protocol, so closing them here would silently kill
+         * remote logging for the rest of the process; their connection and
+         * retry state carry over unchanged. */
+        if (s && s->kind != HX_SINK_KIND_CALLBACK &&
+                  s->kind != HX_SINK_KIND_NETWORK) {
             int j;
             hx_sink_flush(s);
             hx_sink_close(s);
@@ -1435,6 +1550,31 @@ static void close_non_callback_sinks_locked(void) {
     }
 }
 
+/* strncpy with an intermediate copy, so `src` may alias `dst`: the documented
+ * get_config -> modify -> reconfigure loop re-passes pointers into our own
+ * buffers, and copying overlapping regions directly is restrict-violating. */
+static void copy_str_safe(char* dst, const char* src, size_t cap) {
+    char tmp[HX_CLOG_PATH_MAX];
+    size_t n;
+    if (cap == 0) {
+        return;
+    }
+    if (!src) {
+        src = "";
+    }
+    n = strlen(src);
+    if (n >= cap) {
+        n = cap - 1;
+    }
+    if (n > sizeof(tmp) - 1) {
+        n = sizeof(tmp) - 1;
+    }
+    memcpy(tmp, src, n);
+    tmp[n] = '\0';
+    memcpy(dst, tmp, n);
+    dst[n] = '\0';
+}
+
 /* Copy `cfg` (already defaulted/validated) into g_core.active_config so
  * hx_clog_get_config() can return it. String fields are copied into owned
  * buffers and re-pointed there. Caller holds init_lock. */
@@ -1447,8 +1587,7 @@ static void store_active_config_locked(const hx_clog_config_t* cfg) {
         (hx_clog_level_t)hx_atomic_load_level(&g_core.level);
 #define HX_CFG_COPY_STR(field, buf) \
     do { \
-        strncpy(g_core.buf, (cfg->field ? cfg->field : ""), sizeof(g_core.buf) - 1); \
-        g_core.buf[sizeof(g_core.buf) - 1] = '\0'; \
+        copy_str_safe(g_core.buf, (cfg->field ? cfg->field : ""), sizeof(g_core.buf)); \
         g_core.active_config.field = g_core.buf; \
     } while (0)
     HX_CFG_COPY_STR(logger_name, cfg_logger_name);
@@ -1462,16 +1601,30 @@ static void store_active_config_locked(const hx_clog_config_t* cfg) {
 
 /* atexit hook: flush (not shutdown) on normal process exit so async/buffered
  * lines are not lost when the program forgets to call hx_clog_shutdown(). Safe
- * and idempotent — a no-op once shut down. Registered once. */
+ * and idempotent — a no-op once shut down. Registered once. The async part is
+ * BOUNDED and liveness-checked: under ExitProcess-style teardown the worker
+ * may already be gone, and waiting for it forever would hang the process in
+ * DLL_PROCESS_DETACH under the loader lock. */
+static void dup_flush_pending(void); /* defined with the write path below */
+
 static int g_atexit_registered = 0;
 static void hx_atexit_flush(void) {
     if (core_is_initialized()) {
-        hx_clog_flush();
+        dup_flush_pending();
+#if defined(HX_CLOG_ENABLE_ASYNC)
+        if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
+            hx_async_flush_bounded(1500);
+        }
+#endif
+        hx_core_flush_sinks();
     }
 }
 
+static int g_init_ring_oom = 0;
+
 static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
     hx_clog_config_t cfg;
+    int no_output_sink = 0;
 
     if (core_is_initialized()) {
         return HX_CLOG_ERR_ALREADY_INITIALIZED;
@@ -1495,23 +1648,44 @@ static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
     }
 
-    strncpy(g_core.pattern, cfg.pattern, sizeof(g_core.pattern) - 1);
-    g_core.pattern[sizeof(g_core.pattern) - 1] = '\0';
+    /* Rebuild the sink table and the format fields under sink_lock: every
+     * other writer of that state (add/remove sink, set_pattern/set_formatter)
+     * holds sink_lock, so resetting it here under init_lock alone could
+     * corrupt a concurrent registration or tear a pattern read. Lock order
+     * init -> sink matches the atfork order. */
+    hx_mutex_lock(&g_core.sink_lock);
+
+    /* Close sinks that were added before init instead of dropping the table
+     * without cleanup — that leaked their state (on Windows including the
+     * network sink's WSAStartup reference). */
+    {
+        int i;
+        for (i = 0; i < g_core.sink_count; ++i) {
+            if (g_core.sinks[i]) {
+                hx_sink_flush(g_core.sinks[i]);
+                hx_sink_close(g_core.sinks[i]);
+                g_core.sinks[i] = NULL;
+            }
+        }
+    }
+    g_core.sink_count = 0;
+
+    copy_str_safe(g_core.pattern, cfg.pattern, sizeof(g_core.pattern));
     g_core.format_mode = cfg.format_mode;
     g_core.formatter = cfg.formatter;
     g_core.formatter_user_data = cfg.formatter_user_data;
     core_set_mode(cfg.mode);
-    g_core.sink_count = 0;
     hx_atomic_store_level(&g_core.override_count, 0);
     hx_atomic_store_level(&g_core.format_gen,
                           hx_atomic_load_level(&g_core.format_gen) + 1);
     hx_atomic_store_level(&g_core.level, (int)cfg.level);
-    strncpy(g_core.default_logger.name, cfg.logger_name,
-            sizeof(g_core.default_logger.name) - 1);
-    g_core.default_logger.name[sizeof(g_core.default_logger.name) - 1] = '\0';
+    copy_str_safe(g_core.default_logger.name, cfg.logger_name,
+                  sizeof(g_core.default_logger.name));
     hx_atomic_store_level(&g_core.default_logger.level, (int)cfg.level);
 
-    hx_ring_init();
+    if (hx_ring_init() != 0) {
+        g_init_ring_oom = 1; /* reported by hx_clog_init, outside all locks */
+    }
 
     /* build sinks */
     if (cfg.enable_console) {
@@ -1530,13 +1704,18 @@ static int hx_clog_init_locked(const hx_clog_config_t* in_config) {
             hx_core_report_error(HX_CLOG_ERR_OPEN_FILE_FAILED,
                                  "file sink creation failed (log_dir/file_name)");
             if (g_core.sink_count == 0) {
-                return HX_CLOG_ERR_OPEN_FILE_FAILED;
+                no_output_sink = 1;
             }
         } else {
             add_sink(fs);
         }
     }
     add_configured_system_sinks(&cfg);
+    hx_mutex_unlock(&g_core.sink_lock);
+
+    if (no_output_sink) {
+        return HX_CLOG_ERR_OPEN_FILE_FAILED;
+    }
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
     if (cfg.mode == HX_CLOG_MODE_ASYNC) {
@@ -1576,6 +1755,14 @@ int hx_clog_init(const hx_clog_config_t* in_config) {
     hx_mutex_lock(&g_core.init_lock);
     rc = hx_clog_init_locked(in_config);
     hx_mutex_unlock(&g_core.init_lock);
+    if (g_init_ring_oom) {
+        /* reported here — outside init_lock — so an error handler that calls
+         * back into the library (e.g. hx_clog_get_config) cannot deadlock */
+        g_init_ring_oom = 0;
+        hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                             "crash ring buffer allocation failed; crash "
+                             "reports will not include recent log history");
+    }
     return rc;
 }
 
@@ -1751,18 +1938,16 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
 #endif
 
     hx_mutex_lock(&g_core.sink_lock);
-    close_non_callback_sinks_locked();
+    close_rebuilt_sinks_locked();
 
-    strncpy(g_core.pattern, cfg.pattern, sizeof(g_core.pattern) - 1);
-    g_core.pattern[sizeof(g_core.pattern) - 1] = '\0';
+    copy_str_safe(g_core.pattern, cfg.pattern, sizeof(g_core.pattern));
     g_core.format_mode = cfg.format_mode;
     g_core.formatter = cfg.formatter;
     g_core.formatter_user_data = cfg.formatter_user_data;
     bump_format_gen_locked();
     hx_atomic_store_level(&g_core.level, (int)cfg.level);
-    strncpy(g_core.default_logger.name, cfg.logger_name,
-            sizeof(g_core.default_logger.name) - 1);
-    g_core.default_logger.name[sizeof(g_core.default_logger.name) - 1] = '\0';
+    copy_str_safe(g_core.default_logger.name, cfg.logger_name,
+                  sizeof(g_core.default_logger.name));
     hx_atomic_store_level(&g_core.default_logger.level, (int)cfg.level);
 
     if (cfg.enable_console) {
@@ -1785,7 +1970,7 @@ static int hx_clog_reconfigure_locked(const hx_clog_config_t* in_config) {
      * once the new worker is actually running (below). This closes the window
      * where producers would otherwise see ASYNC with no engine behind it. */
     core_set_mode(HX_CLOG_MODE_SYNC);
-    recompute_override_count_locked(); /* surviving callback sinks may have overrides */
+    recompute_override_count_locked(); /* surviving callback/network sinks may have overrides */
     hx_mutex_unlock(&g_core.sink_lock);
 
 #if defined(HX_CLOG_ENABLE_ASYNC)
@@ -1860,6 +2045,10 @@ int hx_clog_get_config(hx_clog_config_t* out) {
     }
     hx_mutex_lock(&g_core.init_lock);
     *out = g_core.active_config;
+    /* refresh the fields that change live, so the snapshot does not contradict
+     * later hx_clog_set_level()/async fallback */
+    out->level = (hx_clog_level_t)hx_atomic_load_level(&g_core.level);
+    out->mode = core_get_mode();
     hx_mutex_unlock(&g_core.init_lock);
     /* NOTE: the returned string pointers (logger_name, log_dir, file_name,
      * pattern, system_logger_name) reference internal storage that stays valid
@@ -2095,6 +2284,15 @@ void hx_clog_after_fork_child(void) {
         if (g_core.sinks[i] && g_core.sinks[i]->is_file) {
             hx_sink_file_after_fork(g_core.sinks[i]);
         }
+#if defined(HX_CLOG_ENABLE_NET)
+        else if (g_core.sinks[i] &&
+                 g_core.sinks[i]->kind == HX_SINK_KIND_NETWORK) {
+            /* drop the inherited TCP connection: parent and child sharing one
+             * stream would interleave bytes and corrupt lines at the collector
+             * (the socket itself is also CLOEXEC/no-inherit) */
+            hx_sink_net_after_fork(g_core.sinks[i]);
+        }
+#endif
     }
 #if defined(HX_CLOG_ENABLE_ASYNC)
     if (core_get_mode() == HX_CLOG_MODE_ASYNC) {
@@ -2117,6 +2315,9 @@ int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config) {
     return HX_CLOG_ERR_PLATFORM;
 }
 void hx_clog_uninstall_crash_handler(void) {
+}
+int hx_clog_crash_handler_recheck(void) {
+    return HX_CLOG_ERR_PLATFORM;
 }
 int hx_clog_crash_set_option(int option, long value) {
     (void)option;
@@ -2457,7 +2658,7 @@ static int dup_check_and_update(hx_clog_level_t level, const char* file,
 }
 
 static void core_writev(const char* logger_name,
-                        volatile int* logger_level,
+                        hx_atomic_int_t* logger_level,
                         hx_clog_level_t level,
                         const char* file, int line, const char* func,
                         const char* fmt, va_list args) {
@@ -2608,6 +2809,11 @@ int hx_clog_logger_create(const char* name,
     if (level < HX_CLOG_LEVEL_TRACE || level > HX_CLOG_LEVEL_OFF) {
         return HX_CLOG_ERR_INVALID_ARGUMENT;
     }
+    if (name && name[0] && strlen(name) >= sizeof(logger->name)) {
+        /* fixed-size storage: truncated names never round-trip through the
+         * registry lookup, so reject instead (use a shorter name) */
+        return HX_CLOG_ERR_INVALID_ARGUMENT;
+    }
     logger = (hx_clog_logger_t*)hx_clog__malloc(sizeof(*logger));
     if (!logger) {
         return HX_CLOG_ERR_OUT_OF_MEMORY;
@@ -2634,7 +2840,8 @@ void hx_clog_logger_destroy(hx_clog_logger_t* logger) {
 static struct hx_clog_logger* logger_find_locked(const char* name) {
     struct hx_clog_logger* p;
     for (p = g_core.logger_head; p; p = p->next) {
-        if (strcmp(p->name, name) == 0) {
+        /* skip detached (zombie) entries left by hx_clog_logger_drop_all */
+        if (p->name[0] && strcmp(p->name, name) == 0) {
             return p;
         }
     }
@@ -2667,6 +2874,12 @@ hx_clog_logger_t* hx_clog_logger_get(const char* name) {
     if (!name || !name[0]) {
         name = "hx_clog";
     }
+    if (strlen(name) >= sizeof(g_core.default_logger.name)) {
+        /* storage is fixed-size; a truncated name would never be found again
+         * by full-name lookup, so every get() would register another entry
+         * forever. Reject instead (use a shorter name). */
+        return NULL;
+    }
     ensure_once();
     hx_mutex_lock(&g_core.logger_lock);
     lg = logger_find_locked(name);
@@ -2675,7 +2888,7 @@ hx_clog_logger_t* hx_clog_logger_get(const char* name) {
         if (lg) {
             int lvl = logger_inherited_level_locked(name);
             memset(lg, 0, sizeof(*lg));
-            strncpy(lg->name, name, sizeof(lg->name) - 1);
+            copy_str_safe(lg->name, name, sizeof(lg->name));
             lg->level = lvl;
             lg->registered = 1;
             lg->next = g_core.logger_head;
@@ -2723,6 +2936,9 @@ int hx_clog_set_level_for_prefix(const char* prefix, hx_clog_level_t level) {
     plen = strlen(prefix);
     hx_mutex_lock(&g_core.logger_lock);
     for (p = g_core.logger_head; p; p = p->next) {
+        if (!p->name[0]) {
+            continue; /* detached (zombie) entry */
+        }
         /* the prefix logger itself and any "prefix.<...>" descendant; an empty
          * prefix matches every registered logger */
         if (plen == 0 ||
@@ -2739,13 +2955,16 @@ void hx_clog_logger_drop_all(void) {
     struct hx_clog_logger* p;
     ensure_once();
     hx_mutex_lock(&g_core.logger_lock);
-    p = g_core.logger_head;
-    while (p) {
-        struct hx_clog_logger* nx = p->next;
-        hx_clog__free(p);
-        p = nx;
+    /* Detach every registry entry WITHOUT freeing it: other threads may hold
+     * cached pointers from hx_clog_logger_get and still be mid-write through
+     * them, so the memory must stay valid (freeing here was a use-after-free
+     * window). Entries become inert — name cleared (logger_find skips them),
+     * logger_count no longer reports them — and are reclaimed only at process
+     * exit. drop_all is a shutdown/tooling operation; re-registering the same
+     * names afterwards allocates fresh entries. */
+    for (p = g_core.logger_head; p; p = p->next) {
+        p->name[0] = '\0';
     }
-    g_core.logger_head = NULL;
     g_core.logger_count = 0;
     hx_mutex_unlock(&g_core.logger_lock);
 }
@@ -2765,7 +2984,7 @@ hx_clog_level_t hx_clog_logger_get_level(const hx_clog_logger_t* logger) {
     if (!logger) {
         return HX_CLOG_LEVEL_OFF;
     }
-    return (hx_clog_level_t)hx_atomic_load_level((volatile int*)&logger->level);
+    return (hx_clog_level_t)hx_atomic_load_level((hx_atomic_int_t*)&logger->level);
 }
 
 const char* hx_clog_logger_name(const hx_clog_logger_t* logger) {

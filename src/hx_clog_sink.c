@@ -129,10 +129,27 @@ static int is_tty(FILE* f) {
 #endif
 }
 
+/* Console writes are best-effort, but a persistently failing stream (disk
+ * full, redirected pipe closed) should surface once instead of silently
+ * swallowing every line. Report on the first failure after a success. */
+static int g_console_err_reported = 0;
+
+static void console_write_checked(FILE* target, const char* data,
+                                  unsigned int size) {
+    if (fwrite(data, 1, size, target) == size) {
+        g_console_err_reported = 0;
+    } else if (!g_console_err_reported) {
+        g_console_err_reported = 1;
+        hx_core_report_error(HX_CLOG_ERR_PLATFORM,
+                             "console sink: write failed (disk full or "
+                             "output stream closed); lines may be lost");
+    }
+}
+
 static int console_write(hx_clog_sink_t* sink, const char* data, unsigned int size) {
     console_impl* c = (console_impl*)sink->impl;
     FILE* out = c->out ? c->out : stdout;
-    fwrite(data, 1, size, out);
+    console_write_checked(out, data, size);
     return HX_CLOG_OK;
 }
 
@@ -165,11 +182,11 @@ void hx_sink_console_emit(hx_clog_sink_t* sink, hx_clog_level_t level,
     }
     if (c->enable_color && tty) {
         const char* col = level_color(level);
-        fwrite(col, 1, strlen(col), target);
-        fwrite(data, 1, size, target);
-        fwrite(COLOR_RESET, 1, strlen(COLOR_RESET), target);
+        console_write_checked(target, col, (unsigned int)strlen(col));
+        console_write_checked(target, data, size);
+        console_write_checked(target, COLOR_RESET, (unsigned int)strlen(COLOR_RESET));
     } else {
-        fwrite(data, 1, size, target);
+        console_write_checked(target, data, size);
     }
 }
 

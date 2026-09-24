@@ -669,7 +669,12 @@ int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config) {
             sizeof(g_crash_dir) - 1);
     g_crash_dir[sizeof(g_crash_dir) - 1] = '\0';
     hx_mkdir_p(g_crash_dir);
-    hx_ring_init();
+    if (hx_ring_init() != 0) {
+        /* not under init_lock here, so reporting directly is safe */
+        hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                             "crash ring buffer allocation failed; crash "
+                             "reports will not include recent log history");
+    }
 
 #if defined(HX_CLOG_ENABLE_STACKTRACE) && defined(HX_CLOG_ENABLE_SYMBOLIZE)
     if (g_cc.symbolize_stacktrace) {
@@ -721,6 +726,19 @@ void hx_clog_uninstall_crash_handler(void) {
     }
 #endif
     g_crash_installed = 0;
+}
+
+int hx_clog_crash_handler_recheck(void) {
+    LPTOP_LEVEL_EXCEPTION_FILTER prev;
+    if (!g_crash_installed) {
+        return HX_CLOG_ERR_NOT_INITIALIZED;
+    }
+    /* SetUnhandledExceptionFilter installs ours and returns the filter that
+     * was in place; if that was already ours nothing had replaced it. The
+     * saved chain target (g_prev_filter) keeps its original value, so
+     * uninstall still restores the pre-us handler. */
+    prev = SetUnhandledExceptionFilter(win_exception_filter);
+    return prev == win_exception_filter ? 0 : 1;
 }
 
 int hx_clog_crash_set_option(int option, long value) {
@@ -1073,7 +1091,12 @@ int hx_clog_install_crash_handler(const hx_clog_crash_config_t* config) {
                              "crash handler: could not create the crash directory;"
                              " reports may fail to write");
     }
-    hx_ring_init();
+    if (hx_ring_init() != 0) {
+        /* not under init_lock here, so reporting directly is safe */
+        hx_core_report_error(HX_CLOG_ERR_OUT_OF_MEMORY,
+                             "crash ring buffer allocation failed; crash "
+                             "reports will not include recent log history");
+    }
 
 #if defined(HX_CLOG_ENABLE_STACKTRACE) && defined(HX_CRASH_HAVE_EXECINFO)
     {
@@ -1153,6 +1176,37 @@ void hx_clog_uninstall_crash_handler(void) {
         g_altstack_installed = 0;
     }
     g_crash_installed = 0;
+}
+
+int hx_clog_crash_handler_recheck(void) {
+    int i;
+    int fixed = 0;
+    if (!g_crash_installed) {
+        return HX_CLOG_ERR_NOT_INITIALIZED;
+    }
+    for (i = 0; i < K_NSIGNALS; ++i) {
+        struct sigaction cur;
+        if (sigaction(k_signals[i], NULL, &cur) == 0 &&
+            cur.sa_sigaction == posix_handler) {
+            continue; /* still ours */
+        }
+        /* Another component replaced this slot; re-assert ours. g_prev_actions
+         * keeps the pre-us handlers, so uninstall semantics are unchanged. */
+        {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = SA_SIGINFO | SA_RESTART;
+            if (g_altstack_installed) {
+                sa.sa_flags |= SA_ONSTACK;
+            }
+            sa.sa_sigaction = posix_handler;
+            if (sigaction(k_signals[i], &sa, NULL) == 0) {
+                fixed = 1;
+            }
+        }
+    }
+    return fixed;
 }
 
 int hx_clog_crash_set_option(int option, long value) {
